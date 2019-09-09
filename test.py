@@ -24,7 +24,7 @@ class Banker(Module):
         divf = 7 - 1
         divq = 2
         t_out = t_clk*n_div*(divr + 1)/(divf + 1)
-        assert t_out == 4.
+        assert t_out == t_clk
         t_vco = t_out/2**divq
         assert .533 <= 1/t_vco <= 1.066, 1/t_vco
         platform.add_period_constraint(cd_sr.clk, t_out)
@@ -94,40 +94,57 @@ class Banker(Module):
         buf = Signal.like(word)
         self.sync.sr += [
             buf.eq(Cat(dat, buf)),
-            word[:len(dat)].eq(Array([buf[i*len(dat):(i + 1)*len(dat)]
+            word[:len(dat)].eq(Array([
+                buf[i*len(dat):(i + 1)*len(dat)]
                 for i in range(n_div)])[tap[:3]]),
             word[len(dat):].eq(word),
         ]
 
-        frame = Signal((len(word) - len(dat) - 1)*n_frame, reset_less=True)
-        marker = Signal(reset_less=True)
-        clk_word = Signal(n_div, reset_less=True)
+        if True:
+            word, word0 = Signal.like(word), word
+            self.sync += word.eq(word0)
+        payload = Signal(len(word) - len(dat) - 1)
+        frame = Signal(len(payload)*n_frame, reset_less=True)
+        marker = Signal(n_frame - 1, reset_less=True)
+        marker_good = Signal()
+        clk_good = Signal()
         slip = Signal(4, reset_less=True)  # slip delay
-        stb = Signal()
         align_err = Signal(8, reset_less=True)
-        self.sync += [
-            clk_word.eq(word[::len(dat)]),
-            marker.eq(word[1]),  # marker is set on last word
-            stb.eq(word[1] & ~marker),
-            frame.eq(Cat(
+        crc = Signal(n_bits)
+        crc_good = Signal(reset=1)
+        crc_err = Signal(8, reset_less=True)
+        body = Signal(len(frame) - len(crc))
+
+        stb = Signal()
+        self.comb += [
+            clk_good.eq(word[::len(dat)] == 0b1100011),
+            marker_good.eq(word[1] & (marker == 0)),
+            payload.eq(Cat(
                 word[2:len(dat)],
-                [word[i*len(dat) + 1:(i + 1)*len(dat)] for i in range(1, n_div)],
-                frame
-            )),
+                [word[i*len(dat) + 1:(i + 1)*len(dat)]
+                    for i in range(1, n_div)])),
+            crc_good.eq(crc == payload[:len(crc)]),
+            body.eq(frame[len(crc):]),
+        ]
+        self.sync += [
+            marker.eq(Cat(word[1], marker)),
+            frame.eq(Cat(payload, frame)),
+
             slip[1:].eq(slip),
-            If((slip[0] == slip[-1]) & (clk_word != 0b1100011),
+            If(~(slip[0] ^ slip[-1]) & ~clk_good,
                 slip[0].eq(~slip[0]),
                 tap.eq(tap + 1),
                 align_err.eq(align_err + 1),
             ),
+            If(marker_good & ~crc_good,
+                crc_err.eq(crc_err + 1),
+            ),
+
+            stb.eq(clk_good & marker_good & crc_good),
         ]
 
-        # TODO
-        crc = Signal(n_bits)
-        crc_good = Signal(reset=1)
         adr = Signal(4)
         cfg = Signal(10)
-        crc_err = Signal(8, reset_less=True)
         rst = Signal()
         bypass = Signal()
         latchinputvalue = Signal()
@@ -154,31 +171,26 @@ class Banker(Module):
         ]
         sr = Signal(n_frame, reset_less=True)
         status = Signal((1 << len(adr))*n_frame)
-        status_val = Cat(Signal(8, reset=0xfa), cfg, crc_good, locked0, locked1, tap, delay0, align_err, crc_err)
+        status_val = Cat(Signal(8, reset=0xfa), cfg, locked0, locked1, tap, delay0, align_err, crc_err)
         assert len(status_val) <= len(status)
         self.comb += [
             status.eq(status_val),
             sdo.eq(sr[-1]),
-            adr.eq(frame[len(cfg):]),
+            adr.eq(body[len(cfg):]),
         ]
         self.sync += [
             sr[1:].eq(sr),
             If(stb,
-                If(crc_good,
-                    cfg.eq(frame),
-                ).Else(
-                    crc_err.eq(crc_err + 1),
-                ),
+                cfg.eq(body),
                 sr.eq(Array([status[i*n_frame:(i + 1)*n_frame]
                     for i in range(1 << len(adr))])[adr]),
             )
         ]
 
-        # self.sync += platform.request("user_led").eq(frame != 0)
+        # self.sync += platform.request("user_led").eq(stb)
 
         cd_spi = ClockDomain("spi")
         self.clock_domains += cd_spi
-
         divr = 1 - 1
         divf = 22 - 1
         divq = 4
@@ -213,12 +225,13 @@ class Banker(Module):
         ]
 
         xfer = BlindTransfer("sys", "spi", n_channels*(n_bits + 1))
-        assert len(xfer.data_i) + len(crc) + len(cfg) + len(adr) <= len(frame)
+        assert len(xfer.data_i) <= len(body)
         self.submodules += xfer
         self.comb += [
-            xfer.i.eq(stb & crc_good),
-            xfer.data_i.eq(frame[-len(xfer.data_i):]),
+            xfer.i.eq(stb),
+            xfer.data_i.eq(body[-len(xfer.data_i):]),
         ]
+        xfer_o, xfer_data_o = xfer.o, xfer.data_o
 
         vhdci = [platform.request("vhdci", i) for i in range(2)]
         idc = [platform.request("idc", i) for i in range(8)]
@@ -237,7 +250,7 @@ class Banker(Module):
         csi = Signal()
         i = Signal(max=n_bits)
         self.sync.spi += [
-            If(xfer.o,
+            If(xfer_o,
                 csi.eq(1),
             ),
             If(csi,
@@ -247,14 +260,18 @@ class Banker(Module):
                 csi.eq(0),
             ),
         ]
-        n = len(xfer.data_o)
+        n = len(xfer_data_o)
         sr = [Signal(n_bits, reset_less=True) for i in range(n_channels)]
         mask = Signal(n_channels, reset_less=True)
-        assert len(Cat(sr, mask)) == len(xfer.data_o)
+        ce = Signal(1)
+        n_ce = n_channels//len(ce)
+        self.comb += [ce[i].eq(~mask[i*n_ce:(i + 1)*n_ce] == 0) for i in
+                range(len(ce))]
+        assert len(Cat(sr, mask)) == len(xfer_data_o)
         self.sync.spi += [
             [sri[1:].eq(sri) for sri in sr],  # MSB first
-            If(xfer.o,
-                Cat(sr, mask).eq(xfer.data_o)
+            If(xfer_o,
+                Cat(sr, mask).eq(xfer_data_o)
             ),
         ]
         for i in range(n_channels):
@@ -264,7 +281,7 @@ class Banker(Module):
                     p_PIN_TYPE=C(0b010100, 6),  # output registered
                     p_IO_STANDARD="SB_LVCMOS",
                     i_OUTPUT_CLK=cd_spi.clk,
-                    #i_CLOCK_ENABLE=mask[i],
+                    # i_CLOCK_ENABLE=ce[i//n_ce],
                     o_PACKAGE_PIN=mosi[i],
                     i_D_OUT_0=sr[i][-1] & mask[i]),
                 Instance(
@@ -272,7 +289,7 @@ class Banker(Module):
                     p_PIN_TYPE=C(0b011100, 6),  # output registered inverted
                     p_IO_STANDARD="SB_LVCMOS",
                     i_OUTPUT_CLK=cd_spi.clk,
-                    #i_CLOCK_ENABLE=mask[i],
+                    # i_CLOCK_ENABLE=ce[i//n_ce],
                     o_PACKAGE_PIN=cs[i],
                     i_D_OUT_0=csi & mask[i]),
                 Instance(
@@ -280,7 +297,7 @@ class Banker(Module):
                     p_PIN_TYPE=C(0b011100, 6),  # output registered inverted
                     p_IO_STANDARD="SB_LVCMOS",
                     i_OUTPUT_CLK=cd_spi.clk,
-                    #i_CLOCK_ENABLE=mask[i],
+                    # i_CLOCK_ENABLE=ce[i//n_ce],
                     o_PACKAGE_PIN=ldac[i],
                     i_D_OUT_0=mask[i]),
                 Instance(
@@ -288,7 +305,7 @@ class Banker(Module):
                     p_PIN_TYPE=C(0b010000, 6),  # output registered DDR
                     p_IO_STANDARD="SB_LVCMOS",
                     i_OUTPUT_CLK=cd_spi.clk,
-                    #i_CLOCK_ENABLE=mask[i],
+                    # i_CLOCK_ENABLE=ce[i//n_ce],
                     o_PACKAGE_PIN=sck[i],
                     i_D_OUT_0=mask[i],
                     i_D_OUT_1=0),
