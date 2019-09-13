@@ -1,6 +1,8 @@
-# Banker
+# Fastino gateware and software development
 
-https://github.com/sinara-hw/Banker/wiki
+# Banker PHY prototype
+
+Hardware: https://github.com/sinara-hw/Banker/wiki
 
 ## Tools
 
@@ -11,7 +13,7 @@ https://github.com/sinara-hw/Banker/wiki
 ## Build
 
 ```
-python gpio.py
+python test.py
 ```
 
 ## FLash
