@@ -1,13 +1,15 @@
+from math import gcd
+
 from migen import *
 from migen.genlib.cdc import MultiReg, AsyncResetSynchronizer, BlindTransfer
-from math import gcd
+from misoc.cores.liteeth_mini.mac.crc import LiteEthMACCRCEngine
 
 # word: n_clk = 7
 # cyc  0 1 2 3 4 5 6
 # clk0 1 1 0 0 0 1 1
-# clk1  1 x 0 0 x 1 1   # on edge
-# clk1  1 0 0 0 1 1 1   # late
-# clk1  1 1 0 0 0 1 1   # early
+# clk1  1 x 0 0 x 1 1   # optimal, on edge
+# clk1   1 0 0 0 1 1 1   # late
+# clk1 1 1 0 0 0 1 1   # early
 # n_pay = n_lanes*n_clk = 42
 
 # frame: n_frame = 14
@@ -26,6 +28,7 @@ class Link(Module):
         self.n_div = 7
         n_lanes = len(data)
 
+        # link clocking
         self.clk_buf = Signal()
         cd_word = ClockDomain("word")
         platform.add_period_constraint(cd_word.clk, t_clk*self.n_div)
@@ -165,18 +168,27 @@ class Frame(Module):
     def __init__(self, n_frame=14):
         n = 7*6
         self.payload = Signal(n)
-        crc = Signal(16)
+        checksum = Signal(16)
         self.body = Signal(n_frame*n -
-                           n_frame//2 - 1 - len(crc))
+                           n_frame//2 - 1 - len(checksum))
         self.stb = Signal()
         self.crc_err = Signal(8, reset_less=True)
+
+        crc = LiteEthMACCRCEngine(
+            data_width=n, width=len(checksum), polynom=0x1021)
+        self.submodules += crc
+
+        self.comb += [
+            crc.data.eq(self.payload),
+            crc.last.eq(checksum),
+        ]
 
         marker_good = Signal()
         crc_good = Signal(reset=1)
         frame = Signal(n*n_frame, reset_less=True)
 
         body_ = Cat(
-            frame[1 + len(crc):n],
+            frame[1 + len(checksum):n],  # most recent
             [frame[1 + i*n:(i + 1)*n] for i in range(1, 1 + n_frame//2)],
             frame[(1 + n_frame//2)*n:],
         )
@@ -185,16 +197,15 @@ class Frame(Module):
         self.comb += [
             marker_good.eq(self.payload[0] & (
                 Cat(frame[i*n] for i in range(n_frame//2)) == 0)),
-            crc_good.eq(crc == self.payload[1:1 + len(crc)]),
+            crc_good.eq(checksum == self.payload[1:1 + len(checksum)]),
             self.body.eq(body_),
         ]
         self.sync += [
             frame.eq(Cat(self.payload, frame)),
             self.stb.eq(0),
-            # TODO crc.eq(),
+            checksum.eq(crc.next),
             If(marker_good,
-                # TODO
-                # crc.eq(),
+                checksum.eq(0),
                 If(crc_good,
                     self.stb.eq(1),
                 ).Else(
@@ -309,6 +320,7 @@ class Banker(Module):
             cd_sys.rst.eq(ResetSignal("word")),
             cd_sys.clk.eq(ClockSignal("word")),
         ]
+        platform.add_period_constraint(cd_sys.clk, t_clk*link.n_div)
 
         frame = Frame()
         self.submodules += frame
@@ -346,7 +358,8 @@ class Banker(Module):
         ]
         sr = Signal(n_frame, reset_less=True)
         status = Signal((1 << len(adr))*n_frame)
-        status_val = Cat(Signal(8, reset=0xfa), cfg, locked, link.tap, link.delay, link.align_err, frame.crc_err)
+        status_val = Cat(Signal(8, reset=0xfa), cfg, locked, link.tap,
+                         link.delay, link.align_err, frame.crc_err)
         assert len(status_val) <= len(status)
         self.comb += [
             status.eq(status_val),
