@@ -332,15 +332,17 @@ class Banker(Module):
         ]
 
         adr = Signal(4)
-        cfg = Signal(10)
+        cfg = Signal(16, reset_less=True)
         rst = Signal()
         bypass = Signal()
         latchinputvalue = Signal()
         locked = Signal()
         delay_feedback = Signal(4)
         delay_relative = Signal(4)
-        self.comb += Cat(rst, bypass, latchinputvalue, delay_feedback,
-                delay_relative).eq(cfg)
+        cfg_ = Cat(rst, bypass, latchinputvalue,
+                   delay_feedback, delay_relative)
+        assert len(cfg_) <= len(cfg)
+        self.comb += cfg_.eq(cfg)
 
         sdo = Signal(reset_less=True)
         self.specials += [
@@ -361,11 +363,12 @@ class Banker(Module):
         ]
         sr = Signal(n_frame, reset_less=True)
         status = Signal((1 << len(adr))*n_frame)
-        status_val = Cat(Signal(8, reset=0xfa), cfg, locked, link.tap,
-                         link.delay, link.align_err, frame.crc_err)
-        assert len(status_val) <= len(status)
+        status_ = Cat(Signal(8, reset=0xfa), cfg, locked, link.tap,
+                      link.delay, link.align_err, frame.crc_err)
+        assert len(status_) <= len(status)
+
         self.comb += [
-            status.eq(status_val),
+            status.eq(status_),
             sdo.eq(sr[-1]),
             adr.eq(frame.body[len(cfg):]),
         ]
@@ -424,6 +427,8 @@ class Banker(Module):
 
         spi = MultiSPI(platform)
         self.submodules += spi
+
+        assert len(cfg) + len(adr) + len(spi.data) <= len(frame.body)
 
         if False:
             xfer = BlindTransfer("sys", "spi", len(spi.data))
