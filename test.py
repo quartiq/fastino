@@ -204,6 +204,91 @@ class Frame(Module):
         ]
 
 
+class MultiSPI(Module):
+    def __init__(self, platform, n_channels=32, n_bits=16):
+        n = n_channels*(n_bits + 1)
+        self.data = Signal(n)
+        self.stb = Signal()
+
+        vhdci = [platform.request("vhdci", i) for i in range(2)]
+        idc = [platform.request("idc", i) for i in range(8)]
+        mosi = vhdci[0].io
+        cs = vhdci[1].io
+        sck = []
+        ldac = []
+        for _ in idc:
+            sck.extend(_.io[i] for i in range(4))
+            ldac.extend(_.io[i + 4] for i in range(4))
+        self.comb += [
+            [_.dir.eq(0b1111) for _ in vhdci],
+            [_.dir.eq(1) for _ in idc],
+            platform.request("drv_oe_n").eq(0),
+        ]
+
+        csi = Signal()
+        i = Signal(max=n_bits)
+        self.sync.spi += [
+            If(self.stb,
+                csi.eq(1),
+            ),
+            If(csi,
+                i.eq(i + 1),
+            ),
+            If(i == n_bits - 1,
+                csi.eq(0),
+            ),
+        ]
+        sr = [Signal(n_bits, reset_less=True) for i in range(n_channels)]
+        mask = Signal(n_channels, reset_less=True)
+        ce = Signal(1)
+        n_ce = n_channels//len(ce)
+        self.comb += [ce[i].eq(~mask[i*n_ce:(i + 1)*n_ce] == 0) for i in
+                range(len(ce))]
+        assert len(Cat(sr, mask)) == n
+        self.sync.spi += [
+            [sri[1:].eq(sri) for sri in sr],  # MSB first
+            If(self.stb,
+                Cat(sr, mask).eq(self.data)
+            ),
+        ]
+        for i in range(n_channels):
+            self.specials += [
+                Instance(
+                    "SB_IO",
+                    p_PIN_TYPE=C(0b010100, 6),  # output registered
+                    p_IO_STANDARD="SB_LVCMOS",
+                    i_OUTPUT_CLK=ClockSignal("spi"),
+                    # i_CLOCK_ENABLE=ce[i//n_ce],
+                    o_PACKAGE_PIN=mosi[i],
+                    i_D_OUT_0=sr[i][-1] & mask[i]),
+                Instance(
+                    "SB_IO",
+                    p_PIN_TYPE=C(0b011100, 6),  # output registered inverted
+                    p_IO_STANDARD="SB_LVCMOS",
+                    i_OUTPUT_CLK=ClockSignal("spi"),
+                    # i_CLOCK_ENABLE=ce[i//n_ce],
+                    o_PACKAGE_PIN=cs[i],
+                    i_D_OUT_0=csi & mask[i]),
+                Instance(
+                    "SB_IO",
+                    p_PIN_TYPE=C(0b011100, 6),  # output registered inverted
+                    p_IO_STANDARD="SB_LVCMOS",
+                    i_OUTPUT_CLK=ClockSignal("spi"),
+                    # i_CLOCK_ENABLE=ce[i//n_ce],
+                    o_PACKAGE_PIN=ldac[i],
+                    i_D_OUT_0=mask[i]),
+                Instance(
+                    "SB_IO",
+                    p_PIN_TYPE=C(0b010000, 6),  # output registered DDR
+                    p_IO_STANDARD="SB_LVCMOS",
+                    i_OUTPUT_CLK=ClockSignal("spi"),
+                    # i_CLOCK_ENABLE=ce[i//n_ce],
+                    o_PACKAGE_PIN=sck[i],
+                    i_D_OUT_0=mask[i],
+                    i_D_OUT_1=0),
+            ]
+
+
 class Banker(Module):
     def __init__(self, platform):
         n_channels = 32
@@ -277,7 +362,7 @@ class Banker(Module):
             )
         ]
 
-        # self.sync += platform.request("user_led").eq(frame.stb)
+        self.comb += platform.request("user_led").eq(frame.stb)
 
         cd_spi = ClockDomain("spi")
         self.clock_domains += cd_spi
@@ -321,95 +406,23 @@ class Banker(Module):
             AsyncResetSynchronizer(cd_spi, ~locked),
         ]
 
-        xfer = BlindTransfer("sys", "spi", n_channels*(n_bits + 1))
-        assert len(xfer.data_i) <= len(frame.body)
-        self.submodules += xfer
-        self.comb += [
-            xfer.i.eq(frame.stb),
-            xfer.data_i.eq(frame.body[-len(xfer.data_i):]),
-        ]
-        xfer_o, xfer_data_o = xfer.o, xfer.data_o
-        if True:  # no cdc, assume timing is comensurate, max delay < min gap
-            xfer_o = frame.stb
-            xfer_data_o = frame.body[-n_channels*(n_bits + 1):]
+        spi = MultiSPI(platform)
+        self.submodules += spi
 
-        vhdci = [platform.request("vhdci", i) for i in range(2)]
-        idc = [platform.request("idc", i) for i in range(8)]
-        mosi = vhdci[0].io
-        cs = vhdci[1].io
-        sck = []
-        ldac = []
-        for _ in idc:
-            sck.extend(_.io[i] for i in range(4))
-            ldac.extend(_.io[i + 4] for i in range(4))
-        self.comb += [
-            [_.dir.eq(0b1111) for _ in vhdci],
-            [_.dir.eq(1) for _ in idc],
-            platform.request("drv_oe_n").eq(0),
-        ]
-
-        csi = Signal()
-        i = Signal(max=n_bits)
-        self.sync.spi += [
-            If(xfer_o,
-                csi.eq(1),
-            ),
-            If(csi,
-                i.eq(i + 1),
-            ),
-            If(i == n_bits - 1,
-                csi.eq(0),
-            ),
-        ]
-        n = len(xfer_data_o)
-        sr = [Signal(n_bits, reset_less=True) for i in range(n_channels)]
-        mask = Signal(n_channels, reset_less=True)
-        ce = Signal(1)
-        n_ce = n_channels//len(ce)
-        self.comb += [ce[i].eq(~mask[i*n_ce:(i + 1)*n_ce] == 0) for i in
-                range(len(ce))]
-        assert len(Cat(sr, mask)) == len(xfer_data_o)
-        self.sync.spi += [
-            [sri[1:].eq(sri) for sri in sr],  # MSB first
-            If(xfer_o,
-                Cat(sr, mask).eq(xfer_data_o)
-            ),
-        ]
-        for i in range(n_channels):
-            self.specials += [
-                Instance(
-                    "SB_IO",
-                    p_PIN_TYPE=C(0b010100, 6),  # output registered
-                    p_IO_STANDARD="SB_LVCMOS",
-                    i_OUTPUT_CLK=cd_spi.clk,
-                    # i_CLOCK_ENABLE=ce[i//n_ce],
-                    o_PACKAGE_PIN=mosi[i],
-                    i_D_OUT_0=sr[i][-1] & mask[i]),
-                Instance(
-                    "SB_IO",
-                    p_PIN_TYPE=C(0b011100, 6),  # output registered inverted
-                    p_IO_STANDARD="SB_LVCMOS",
-                    i_OUTPUT_CLK=cd_spi.clk,
-                    # i_CLOCK_ENABLE=ce[i//n_ce],
-                    o_PACKAGE_PIN=cs[i],
-                    i_D_OUT_0=csi & mask[i]),
-                Instance(
-                    "SB_IO",
-                    p_PIN_TYPE=C(0b011100, 6),  # output registered inverted
-                    p_IO_STANDARD="SB_LVCMOS",
-                    i_OUTPUT_CLK=cd_spi.clk,
-                    # i_CLOCK_ENABLE=ce[i//n_ce],
-                    o_PACKAGE_PIN=ldac[i],
-                    i_D_OUT_0=mask[i]),
-                Instance(
-                    "SB_IO",
-                    p_PIN_TYPE=C(0b010000, 6),  # output registered DDR
-                    p_IO_STANDARD="SB_LVCMOS",
-                    i_OUTPUT_CLK=cd_spi.clk,
-                    # i_CLOCK_ENABLE=ce[i//n_ce],
-                    o_PACKAGE_PIN=sck[i],
-                    i_D_OUT_0=mask[i],
-                    i_D_OUT_1=0),
+        if False:
+            xfer = BlindTransfer("sys", "spi", len(spi.data))
+            assert len(spi.data) <= len(frame.body)
+            self.submodules += xfer
+            self.comb += [
+                xfer.i.eq(frame.stb),
+                xfer.data_i.eq(frame.body[-len(xfer.data_i):]),
+                spi.stb.eq(xfer.o),
+                spi.data.eq(xfer.data_o),
+            ]
+        else:  # no cdc, assume timing is comensurate, max delay < min gap
+            self.comb += [
+                spi.stb.eq(frame.stb),
+                spi.data.eq(frame.body[-len(spi.data):])
             ]
 
 
