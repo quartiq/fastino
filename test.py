@@ -178,12 +178,15 @@ class Frame(Module):
             data_width=n, width=len(checksum), polynom=0x1021)
         self.submodules += crc
 
+        marker_good = Signal()
+
         self.comb += [
-            crc.data.eq(self.payload),
+            crc.data.eq(Mux(marker_good,
+                Cat(C(1, len(checksum) + 1), self.payload[1 + len(checksum):]),
+                self.payload)),
             crc.last.eq(checksum),
         ]
 
-        marker_good = Signal()
         crc_good = Signal(reset=1)
         frame = Signal(n*n_frame, reset_less=True)
 
@@ -197,7 +200,7 @@ class Frame(Module):
         self.comb += [
             marker_good.eq(self.payload[0] & (
                 Cat(frame[i*n] for i in range(n_frame//2)) == 0)),
-            crc_good.eq(checksum == self.payload[1:1 + len(checksum)]),
+            crc_good.eq(crc.next == self.payload[1:1 + len(checksum)]),
             self.body.eq(body_),
         ]
         self.sync += [
@@ -375,7 +378,7 @@ class Banker(Module):
             )
         ]
 
-        self.comb += platform.request("user_led").eq(frame.stb)
+        self.comb += platform.request("user_led").eq(~ResetSignal())
 
         cd_spi = ClockDomain("spi")
         self.clock_domains += cd_spi
