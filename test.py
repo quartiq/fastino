@@ -5,11 +5,11 @@ from migen.genlib.cdc import MultiReg, AsyncResetSynchronizer, BlindTransfer
 from misoc.cores.liteeth_mini.mac.crc import LiteEthMACCRCEngine
 
 # word: n_clk = 7
-# cyc  0 1 2 3 4 5 6
-# clk0 1 1 0 0 0 1 1
-# clk1  1 x 0 0 x 1 1   # optimal, on edge
-# clk1   1 0 0 0 1 1 1   # late
-# clk1 1 1 0 0 0 1 1   # early
+# cyc   0 1 2 3 4 5 6
+# clk0  1 1 0 0 0 1 1
+# clk1 1 1 x 0 0 x 1   # optimal, on edge
+# clk1 1 1 0 0 0 1 1   # late
+# clk1 1 1 1 0 0 0 1   # early
 # n_pay = n_lanes*n_clk = 42
 
 # frame: n_frame = 14
@@ -23,6 +23,33 @@ from misoc.cores.liteeth_mini.mac.crc import LiteEthMACCRCEngine
 # n_body = n_frame//2*(2*n_pay - 1) - n_crc
 
 
+class SlipSR(Module):
+    def __init__(self, n_lanes=6, n_div=7):
+        self.data = Signal(n_lanes)
+        self.slip_req = Signal()
+        self.word = Signal(n_div*len(self.data), reset_less=True)
+
+        buf = Signal.like(self.word)
+        clk0 = Signal()
+        i = Signal(n_div, reset=1)
+        slipped = Signal.like(buf)
+        slip_stb = Signal()
+        self.sync.sr += [
+            buf.eq(Cat(self.data, buf)),
+            clk0.eq(ClockSignal("word")),
+            slip_stb.eq(self.slip_req & ClockSignal("word") & ~clk0),
+            If(slip_stb,
+                i.eq(Cat(i[-1], i)),
+            ),
+            If(i[-1],
+                slipped.eq(buf),
+            )
+        ]
+        self.sync.word += [
+            self.word.eq(slipped),
+        ]
+
+
 class Link(Module):
     def __init__(self, clk, data, platform, t_clk=4.):
         self.n_div = 7
@@ -34,7 +61,7 @@ class Link(Module):
         platform.add_period_constraint(cd_word.clk, t_clk*self.n_div)
         self.clock_domains += cd_word
 
-        cd_sr = ClockDomain("sr")
+        cd_sr = ClockDomain("sr", reset_less=True)
         self.clock_domains += cd_sr
         divr = 1 - 1
         divf = self.n_div - 1
@@ -77,46 +104,40 @@ class Link(Module):
                 o_PLLOUTGLOBALB=cd_word.clk,
                 # o_PLLOUTCOREB=,
             ),
-            AsyncResetSynchronizer(cd_sr, ~locked),
-            AsyncResetSynchronizer(cd_word, cd_sr.rst),
+            AsyncResetSynchronizer(cd_word, ~locked),
         ]
 
         # input PIO registers
-        dat = Signal(n_lanes + 2)
+        sr = SlipSR(n_lanes=n_lanes + 2, n_div=self.n_div)
+        self.submodules += sr
+
+        clk_helper = Signal()
         self.specials += [
             Instance(
                 "SB_GB_IO",
                 p_PIN_TYPE=0b000000,  # no output, i registered
                 p_IO_STANDARD="SB_LVDS_INPUT",
                 i_INPUT_CLK=cd_sr.clk,
-                o_D_IN_0=dat[0],
-                # o_D_IN_1=dat[1],  # doesn't meet timing
+                o_D_IN_0=sr.data[0],
+                o_D_IN_1=clk_helper,
                 o_GLOBAL_BUFFER_OUTPUT=self.clk_buf,
                 i_PACKAGE_PIN=clk,
+            ),
+            Instance(  # ignore timing
+                "SB_DFFN",
+                i_D=clk_helper,
+                i_C=cd_sr.clk,
+                o_Q=sr.data[1],
             ),
             [Instance(
                 "SB_IO",
                 p_PIN_TYPE=0b000000,
                 p_IO_STANDARD="SB_LVDS_INPUT",
                 i_INPUT_CLK=cd_sr.clk,
-                o_D_IN_0=dat[i + 2],
-                io_PACKAGE_PIN=data[i],
+                o_D_IN_0=sr.data[i + 2],
+                i_PACKAGE_PIN=data[i],
             ) for i in range(n_lanes)]
         ]
-
-        # bitslip buffer
-        self.tap = Signal(3, reset_less=True, reset=0)
-        buf = Signal(self.n_div*len(dat), reset_less=True)
-        word0 = Signal.like(buf)
-        word = Signal.like(buf)
-        self.sync.sr += [
-            buf.eq(Cat(dat, buf)),
-            word0.eq(Cat(Array([
-                buf[i*len(dat):(i + 1)*len(dat)]
-                for i in range(self.n_div)])[self.tap], word0)),
-        ]
-        # word clock retiming register
-        self.sync.word += word.eq(word0)
 
         self.payload = Signal(n_lanes*self.n_div)
         clk0 = Signal(4)
@@ -131,9 +152,9 @@ class Link(Module):
 
         self.comb += [
             # relevant clock samples for bit slip alignment
-            clk0.eq(Cat(word[i*len(dat)] for i in (1, 2, 4, 5))),
+            clk0.eq(Cat(sr.word[i*len(sr.data)] for i in (1, 2, 4, 5))),
             # relevant clock samples for sub-sample delay alignment
-            clk1.eq(Cat(word[1 + i*len(dat)] for i in (1, 4))),
+            clk1.eq(Cat(sr.word[1 + i*len(sr.data)] for i in (2, 5))),
             slip_good.eq(clk0 == 0b1001),
             # early sampling, increase clock delay, decrease feedback delay
             delay_dec.eq(clk1 == 0b10),
@@ -141,16 +162,17 @@ class Link(Module):
             delay_inc.eq(clk1 == 0b01),
             slip_done.eq(~(slip[0] ^ slip[1])),
             self.stb.eq(slip_good & slip_done),
-            self.payload.eq(Cat([word[2 + i*len(dat):(i + 1)*len(dat)]
+            self.payload.eq(Cat([sr.word[2 + i*len(sr.data):(i + 1)*len(sr.data)]
                 for i in range(self.n_div)])),
         ]
         self.sync.word += [
+            sr.slip_req.eq(0),
             # propagate through slip adjustment delay line
             slip[1:].eq(slip),
             If(slip_done,
                 If(~slip_good,
+                    sr.slip_req.eq(1),
                     slip[0].eq(~slip[0]),
-                    self.tap.eq(self.tap + 1),
                     self.delay.eq(self.delay.reset),
                     self.align_err.eq(self.align_err + 1),
                 ).Elif(delay_inc & (self.delay != 0xf),
@@ -207,7 +229,7 @@ class Frame(Module):
             frame.eq(Cat(self.payload, frame)),
             self.stb.eq(0),
             checksum.eq(crc.next),
-            If(marker_good,
+            If(marker_good & ~ResetSignal("word"),
                 checksum.eq(0),
                 If(crc_good,
                     self.stb.eq(1),
@@ -359,7 +381,7 @@ class Banker(Module):
         ]
         sr = Signal(n_frame, reset_less=True)
         status = Signal((1 << len(adr))*n_frame)
-        status_ = Cat(Signal(8, reset=0xfa), locked, link.tap,
+        status_ = Cat(Signal(8, reset=0xfa), locked,
                       link.delay, link.delay_relative,
                       link.align_err, frame.crc_err, cfg.raw_bits())
         assert len(status_) <= len(status)
