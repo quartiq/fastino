@@ -52,7 +52,7 @@ class Link(Module):
         self.specials += [
             Instance(
                 "SB_PLL40_2F_CORE",
-                p_FEEDBACK_PATH="DELAY",   # out = in/r*f, vco = out*2**q
+                p_FEEDBACK_PATH="PHASE_AND_DELAY",   # out = in/r*f, vco = out*2**q
                 p_DIVR=divr,  # input
                 p_DIVF=divf,  # feedback
                 p_DIVQ=divq,  # vco
@@ -168,10 +168,10 @@ class Frame(Module):
     def __init__(self, n_frame=14):
         n = 7*6
         self.payload = Signal(n)
-        checksum = Signal(16)
+        checksum = Signal(16, reset_less=True)
         self.body = Signal(n_frame*n -
                            n_frame//2 - 1 - len(checksum))
-        self.stb = Signal()
+        self.stb = Signal(reset_less=True)
         self.crc_err = Signal(8, reset_less=True)
 
         crc = LiteEthMACCRCEngine(
@@ -181,9 +181,9 @@ class Frame(Module):
         marker_good = Signal()
 
         self.comb += [
-            crc.data.eq(Mux(marker_good,
-                Cat(C(1, len(checksum) + 1), self.payload[1 + len(checksum):]),
-                self.payload)),
+            crc.data.eq(Cat(self.payload[0],
+                Mux(marker_good, C(0, len(checksum)), self.payload[1:1 + len(checksum)]),
+                self.payload[1 + len(checksum):])),
             crc.last.eq(checksum),
         ]
 
@@ -198,8 +198,8 @@ class Frame(Module):
         assert len(body_) == len(self.body)
 
         self.comb += [
-            marker_good.eq(self.payload[0] & (
-                Cat(frame[i*n] for i in range(n_frame//2)) == 0)),
+            marker_good.eq(Cat(
+                self.payload[0], [frame[i*n] for i in range(n_frame//2)]) == 1),
             crc_good.eq(crc.next == self.payload[1:1 + len(checksum)]),
             self.body.eq(body_),
         ]
@@ -254,10 +254,6 @@ class MultiSPI(Module):
         ]
         sr = [Signal(n_bits, reset_less=True) for i in range(n_channels)]
         mask = Signal(n_channels, reset_less=True)
-        ce = Signal(1)
-        n_ce = n_channels//len(ce)
-        self.comb += [ce[i].eq(~mask[i*n_ce:(i + 1)*n_ce] == 0) for i in
-                range(len(ce))]
         assert len(Cat(sr, mask)) == n
         self.sync.spi += [
             [sri[1:].eq(sri) for sri in sr],  # MSB first
@@ -265,6 +261,8 @@ class MultiSPI(Module):
                 Cat(sr, mask).eq(self.data)
             ),
         ]
+        ce = Signal(1)
+        self.comb += ce.eq(mask != 0)
         for i in range(n_channels):
             self.specials += [
                 Instance(
@@ -272,7 +270,7 @@ class MultiSPI(Module):
                     p_PIN_TYPE=C(0b010100, 6),  # output registered
                     p_IO_STANDARD="SB_LVCMOS",
                     i_OUTPUT_CLK=ClockSignal("spi"),
-                    # i_CLOCK_ENABLE=ce[i//n_ce],
+                    i_CLOCK_ENABLE=ce,
                     o_PACKAGE_PIN=mosi[i],
                     i_D_OUT_0=sr[i][-1] & mask[i]),
                 Instance(
@@ -280,7 +278,7 @@ class MultiSPI(Module):
                     p_PIN_TYPE=C(0b011100, 6),  # output registered inverted
                     p_IO_STANDARD="SB_LVCMOS",
                     i_OUTPUT_CLK=ClockSignal("spi"),
-                    # i_CLOCK_ENABLE=ce[i//n_ce],
+                    i_CLOCK_ENABLE=ce,
                     o_PACKAGE_PIN=cs[i],
                     i_D_OUT_0=csi & mask[i]),
                 Instance(
@@ -288,7 +286,7 @@ class MultiSPI(Module):
                     p_PIN_TYPE=C(0b011100, 6),  # output registered inverted
                     p_IO_STANDARD="SB_LVCMOS",
                     i_OUTPUT_CLK=ClockSignal("spi"),
-                    # i_CLOCK_ENABLE=ce[i//n_ce],
+                    i_CLOCK_ENABLE=ce,
                     o_PACKAGE_PIN=ldac[i],
                     i_D_OUT_0=mask[i]),
                 Instance(
@@ -296,7 +294,7 @@ class MultiSPI(Module):
                     p_PIN_TYPE=C(0b010000, 6),  # output registered DDR
                     p_IO_STANDARD="SB_LVCMOS",
                     i_OUTPUT_CLK=ClockSignal("spi"),
-                    # i_CLOCK_ENABLE=ce[i//n_ce],
+                    i_CLOCK_ENABLE=ce,
                     o_PACKAGE_PIN=sck[i],
                     i_D_OUT_0=mask[i],
                     i_D_OUT_1=0),
@@ -332,19 +330,17 @@ class Banker(Module):
         ]
 
         adr = Signal(4)
-        cfg = Signal(16, reset_less=True)
-        rst = Signal()
-        bypass = Signal()
-        latchinputvalue = Signal()
+        cfg = Record([
+            ("rst", 1),
+            ("bypass", 1),
+            ("latchinputvalue", 1),
+            ("delay_feedback", 4),
+            ("delay_relative", 4),
+            ("reserved", 5),
+        ], reset_less=True)
         locked = Signal()
-        delay_feedback = Signal(4)
-        delay_relative = Signal(4)
-        cfg_ = Cat(rst, bypass, latchinputvalue,
-                   delay_feedback, delay_relative)
-        assert len(cfg_) <= len(cfg)
-        self.comb += cfg_.eq(cfg)
 
-        sdo = Signal(reset_less=True)
+        sdo = Signal()
         self.specials += [
             Instance(
                 "SB_IO",
@@ -363,8 +359,9 @@ class Banker(Module):
         ]
         sr = Signal(n_frame, reset_less=True)
         status = Signal((1 << len(adr))*n_frame)
-        status_ = Cat(Signal(8, reset=0xfa), cfg, locked, link.tap,
-                      link.delay, link.align_err, frame.crc_err)
+        status_ = Cat(Signal(8, reset=0xfa), locked, link.tap,
+                      link.delay, link.delay_relative,
+                      link.align_err, frame.crc_err, cfg.raw_bits())
         assert len(status_) <= len(status)
 
         self.comb += [
@@ -381,7 +378,10 @@ class Banker(Module):
             )
         ]
 
-        self.comb += platform.request("user_led").eq(~ResetSignal())
+        self.comb += [
+            platform.request("user_led").eq(~ResetSignal()),
+            platform.request("test_point").eq(frame.stb),
+        ]
 
         cd_spi = ClockDomain("spi")
         self.clock_domains += cd_spi
@@ -392,7 +392,7 @@ class Banker(Module):
         assert t_out >= 20., t_out
         assert t_out < t_clk*link.n_div
         platform.add_period_constraint(cd_spi.clk, t_out)
-        print("min cd_sys-cd_spi gap", min((i*t_out) % (t_clk*link.n_div)
+        print("min sys-spi clock delay", min((i*t_out) % (t_clk*link.n_div)
             for i in range(1, (divf + 1)//gcd(divr + 1, divf + 1))))
         t_idle = n_frame*t_clk*link.n_div - (n_bits + 1)*t_out
         assert t_idle >= 0, t_idle
@@ -402,7 +402,7 @@ class Banker(Module):
         self.specials += [
             Instance(
                 "SB_PLL40_CORE",
-                p_FEEDBACK_PATH="PHASE_AND_DELAY",
+                p_FEEDBACK_PATH="DELAY",
                 p_DIVR=divr,  # input
                 p_DIVF=divf,  # feedback
                 p_DIVQ=divq,  # vco
@@ -413,11 +413,11 @@ class Banker(Module):
                 p_FDA_FEEDBACK=0,
                 p_DELAY_ADJUSTMENT_MODE_RELATIVE="DYNAMIC",
                 p_FDA_RELATIVE=0,
-                i_BYPASS=bypass,
-                i_RESETB=~(rst | cd_sys.rst),
-                i_DYNAMICDELAY=Cat(delay_feedback, delay_relative),
+                i_BYPASS=cfg.bypass,
+                i_RESETB=~(cfg.rst | cd_sys.rst),
+                i_DYNAMICDELAY=Cat(cfg.delay_feedback, cfg.delay_relative),
                 i_REFERENCECLK=link.clk_buf,
-                i_LATCHINPUTVALUE=latchinputvalue,
+                i_LATCHINPUTVALUE=cfg.latchinputvalue,
                 o_LOCK=locked,
                 o_PLLOUTGLOBAL=cd_spi.clk,
                 # o_PLLOUTCORE=,
@@ -440,7 +440,9 @@ class Banker(Module):
                 spi.stb.eq(xfer.o),
                 spi.data.eq(xfer.data_o),
             ]
-        else:  # no cdc, assume timing is comensurate, max delay < min gap
+        else:
+            # no cdc, assume timing is comensurate
+            # max data delay <= min clock delay
             self.comb += [
                 spi.stb.eq(frame.stb),
                 spi.data.eq(frame.body[-len(spi.data):])
