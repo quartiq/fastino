@@ -323,7 +323,7 @@ class MultiSPI(Module):
             ]
 
 
-class Banker(Module):
+class Fastino(Module):
     def __init__(self, platform):
         n_channels = 32
         n_bits = 16
@@ -474,5 +474,5 @@ class Banker(Module):
 if __name__ == "__main__":
     from banker import Platform
     platform = Platform()
-    banker = Banker(platform)
-    platform.build(banker)
+    fastino = Fastino(platform)
+    platform.build(fastino, build_name="fastino")
