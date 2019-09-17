@@ -12,16 +12,6 @@ from misoc.cores.liteeth_mini.mac.crc import LiteEthMACCRCEngine
 # clk1 1 1 1 0 0 0 1   # early
 # n_pay = n_lanes*n_clk = 42
 
-# frame: n_frame = 14
-# 0: body(n_pay)
-# ...
-# n_frame//2 - 1: body(n_pay)
-# ...
-# n_frame//2: marker(1), body(n_pay - 1)
-# ...
-# n_frame: marker(1), crc(n_crc = 16), body(n_pay - 1 - 16)
-# n_body = n_frame//2*(2*n_pay - 1) - n_crc
-
 
 class SlipSR(Module):
     def __init__(self, n_lanes=6, n_div=7):
@@ -186,46 +176,55 @@ class Link(Module):
         ]
 
 
+# frame: n_frame = 14
+# 0: body(n_pay)
+# ...
+# n_frame//2 - 4: body(n_pay)
+# ...
+# n_frame//2 - 3: marker(1), body(n_pay - 1)
+# ...
+# n_frame - 2: marker(1), body(n_pay - 1)
+# n_frame - 1: crc(n_crc = 12), body(n_pay - 12)
+# n_body = n_frame//2*(2*n_pay - 1) - n_crc
+
+
 class Frame(Module):
     def __init__(self, n_frame=14):
         n = 7*6
         self.payload = Signal(n)
-        self.checksum = checksum = Signal(16, reset_less=True)
-        self.body = Signal(n_frame*n -
-                           n_frame//2 - 1 - len(checksum))
+        self.submodules.crc = LiteEthMACCRCEngine(
+            data_width=n, width=12, polynom=0x80F)
+        self.checksum = checksum = Signal(len(self.crc.last), reset_less=True)
+        self.body = Signal(n_frame*n - n_frame//2 - 1 - len(checksum))
         self.stb = Signal(reset_less=True)
         self.crc_err = Signal(8, reset_less=True)
-
-        self.submodules.crc = LiteEthMACCRCEngine(
-            data_width=n, width=len(checksum), polynom=0x1021)
+        self.crc_good = crc_good = Signal()
 
         marker_good = Signal()
-
         self.comb += [
-            self.crc.data.eq(Cat(self.payload[0],
-                Mux(marker_good, C(0, len(checksum)), self.payload[1:1 + len(checksum)]),
-                self.payload[1 + len(checksum):])),
+            self.crc.data.eq(Cat(
+                Mux(marker_good, C(0, len(checksum)), self.payload[:len(checksum)]),
+                self.payload[len(checksum):])),
             self.crc.last.eq(checksum),
         ]
 
-        self.crc_good = crc_good = Signal()
         frame = Signal(n*n_frame, reset_less=True)
 
         body_ = Cat(
-            frame[1 + len(checksum):n],  # most recent
-            [frame[1 + i*n:(i + 1)*n] for i in range(1, 1 + n_frame//2)],
-            frame[(1 + n_frame//2)*n:],
+            frame[len(checksum):n],  # most recent
+            [frame[1 + i*n:(i + 1)*n] for i in range(1, 2 + n_frame//2)],
+            frame[(2 + n_frame//2)*n:],
         )
         assert len(body_) == len(self.body)
 
         self.comb += [
-            marker_good.eq(Cat(
-                self.payload[0], [frame[i*n] for i in range(n_frame//2)]) == 1),
-            crc_good.eq(self.crc.next == self.payload[1:1 + len(checksum)]),
+            crc_good.eq(self.crc.next == self.payload[:len(checksum)]),
             self.body.eq(body_),
         ]
         self.sync += [
             frame.eq(Cat(self.payload, frame)),
+            marker_good.eq(Cat(
+                self.payload[0], [frame[i*n] for i in range(n_frame//2)]) == 1),
             self.stb.eq(0),
             checksum.eq(self.crc.next),
             If(marker_good & ~ResetSignal("word"),
@@ -324,7 +323,6 @@ class MultiSPI(Module):
 
 class Fastino(Module):
     def __init__(self, platform):
-        n_channels = 32
         n_bits = 16
         n_frame = 14
         t_clk = 4.
@@ -357,7 +355,7 @@ class Fastino(Module):
             ("latchinputvalue", 1),
             ("delay_feedback", 4),
             ("delay_relative", 4),
-            ("reserved", 5),
+            ("reserved", 9),
         ], reset_less=True)
         locked = Signal()
 
@@ -467,7 +465,7 @@ class Fastino(Module):
         spi = MultiSPI(platform)
         self.submodules += spi
 
-        assert len(cfg) + len(adr) + len(spi.data) <= len(frame.body)
+        assert len(cfg) + len(adr) + len(spi.data) == len(frame.body)
 
         if False:
             xfer = BlindTransfer("sys", "spi", len(spi.data))
