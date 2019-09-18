@@ -65,7 +65,7 @@ class Link(Module):
         # input clock PLL
         locked = Signal()
         self.delay = Signal(4, reset_less=True)
-        self.delay_relative = Signal(4, reset_less=True)
+        self.delay_relative = Signal(4, reset=0xf, reset_less=True)
         self.specials += [
             Instance(
                 "SB_PLL40_2F_CORE",
@@ -193,7 +193,7 @@ class Frame(Module):
         n = 7*6
         self.payload = Signal(n)
         self.submodules.crc = LiteEthMACCRCEngine(
-            data_width=n, width=12, polynom=0x80F)
+            data_width=n, width=12, polynom=0x80f)  # crc-12 telco
         self.checksum = checksum = Signal(len(self.crc.last), reset_less=True)
         self.body = Signal(n_frame*n - n_frame//2 - 1 - len(checksum))
         self.stb = Signal(reset_less=True)
@@ -202,23 +202,24 @@ class Frame(Module):
 
         marker_good = Signal()
         self.comb += [
-            self.crc.data.eq(Cat(
-                Mux(marker_good, C(0, len(checksum)), self.payload[:len(checksum)]),
-                self.payload[len(checksum):])),
+            self.crc.data.eq(self.payload),
             self.crc.last.eq(checksum),
         ]
 
         frame = Signal(n*n_frame, reset_less=True)
 
         body_ = Cat(
-            frame[len(checksum):n],  # most recent
+            # checksum
+            frame[len(checksum):n],
+            # marker bits
             [frame[1 + i*n:(i + 1)*n] for i in range(1, 2 + n_frame//2)],
+            # complete words
             frame[(2 + n_frame//2)*n:],
         )
         assert len(body_) == len(self.body)
 
         self.comb += [
-            crc_good.eq(self.crc.next == self.payload[:len(checksum)]),
+            crc_good.eq(self.crc.next == 0),
             self.body.eq(body_),
         ]
         self.sync += [
@@ -227,9 +228,11 @@ class Frame(Module):
                 self.payload[0], [frame[i*n] for i in range(n_frame//2)]) == 1),
             self.stb.eq(0),
             checksum.eq(self.crc.next),
+            # TODO: invalidate marker, checksum on ~link.stb
             If(marker_good & ~ResetSignal("word"),
                 checksum.eq(0),
-                If(1,  # TODO crc_good,
+                self.stb.eq(1),  # TODO: remove
+                If(crc_good,
                     self.stb.eq(1),
                 ).Else(
                     self.crc_err.eq(self.crc_err + 1),
@@ -261,9 +264,15 @@ class MultiSPI(Module):
 
         csi = Signal()
         i = Signal(max=n_bits)
+        sr = [Signal(n_bits, reset_less=True) for i in range(n_channels)]
+        mask = Signal(n_channels, reset_less=True)
+        assert len(Cat(sr, mask)) == n
+
         self.sync.spi += [
+            [sri[1:].eq(sri) for sri in sr],  # MSB first
             If(~csi & self.stb,
                 csi.eq(1),
+                Cat(mask, sr).eq(self.data)
             ),
             If(csi,
                 i.eq(i + 1),
@@ -272,33 +281,24 @@ class MultiSPI(Module):
                 csi.eq(0),
             ),
         ]
-        sr = [Signal(n_bits, reset_less=True) for i in range(n_channels)]
-        mask = Signal(n_channels, reset_less=True)
-        assert len(Cat(sr, mask)) == n
-        self.sync.spi += [
-            [sri[1:].eq(sri) for sri in sr],  # MSB first
-            If(self.stb,
-                Cat(sr, mask).eq(self.data)
-            ),
-        ]
         ce = Signal(1)
         self.comb += ce.eq(mask != 0)
-        for i in range(n_channels):
+        for i in range(8, 16):
             self.specials += [
                 Instance(
                     "SB_IO",
                     p_PIN_TYPE=C(0b010100, 6),  # output registered
                     p_IO_STANDARD="SB_LVCMOS",
                     i_OUTPUT_CLK=ClockSignal("spi"),
-                    i_CLOCK_ENABLE=ce,
+                    #i_CLOCK_ENABLE=ce,
                     o_PACKAGE_PIN=mosi[i],
-                    i_D_OUT_0=sr[i][-1] & mask[i]),
+                    i_D_OUT_0=csi & sr[i][-1] & mask[i]),
                 Instance(
                     "SB_IO",
                     p_PIN_TYPE=C(0b011100, 6),  # output registered inverted
                     p_IO_STANDARD="SB_LVCMOS",
                     i_OUTPUT_CLK=ClockSignal("spi"),
-                    i_CLOCK_ENABLE=ce,
+                    #i_CLOCK_ENABLE=ce,
                     o_PACKAGE_PIN=cs[i],
                     i_D_OUT_0=csi & mask[i]),
                 #Instance(
@@ -306,18 +306,18 @@ class MultiSPI(Module):
                 #    p_PIN_TYPE=C(0b011100, 6),  # output registered inverted
                 #    p_IO_STANDARD="SB_LVCMOS",
                 #    i_OUTPUT_CLK=ClockSignal("spi"),
-                #    i_CLOCK_ENABLE=ce,
+                #    #i_CLOCK_ENABLE=ce,
                 #    o_PACKAGE_PIN=ldac[i],
                 #    i_D_OUT_0=mask[i]),
-                Instance(
-                    "SB_IO",
-                    p_PIN_TYPE=C(0b010000, 6),  # output registered DDR
-                    p_IO_STANDARD="SB_LVCMOS",
-                    i_OUTPUT_CLK=ClockSignal("spi"),
-                    i_CLOCK_ENABLE=ce,
-                    o_PACKAGE_PIN=sck[i],
-                    i_D_OUT_0=mask[i],
-                    i_D_OUT_1=0),
+                #Instance(
+                #    "SB_IO",
+                #    p_PIN_TYPE=C(0b010000, 6),  # output registered DDR
+                #    p_IO_STANDARD="SB_LVCMOS",
+                #    i_OUTPUT_CLK=ClockSignal("spi"),
+                #    #i_CLOCK_ENABLE=ce,
+                #    o_PACKAGE_PIN=sck[i],
+                #    i_D_OUT_0=csi & mask[i],
+                #    i_D_OUT_1=0),
             ]
 
 
@@ -353,9 +353,7 @@ class Fastino(Module):
             ("rst", 1),
             ("bypass", 1),
             ("latchinputvalue", 1),
-            ("delay_feedback", 4),
-            ("delay_relative", 4),
-            ("reserved", 9),
+            ("reserved", 17),
         ], reset_less=True)
         locked = Signal()
 
@@ -376,8 +374,8 @@ class Fastino(Module):
                 o_PACKAGE_PIN=platform.request("eem2_n", 7),
                 i_D_OUT_0=sdo),  # falling SCK
         ]
-        sr = Signal(n_frame, reset_less=True)
-        status = Signal((1 << len(adr))*n_frame)
+        sr = Signal(n_frame//2, reset_less=True)
+        status = Signal((1 << len(adr))*n_frame//2)
         status_ = Cat(C(0xfa, 8), locked,
                       link.delay, link.delay_relative,
                       link.align_err, frame.crc_err, cfg.raw_bits())
@@ -392,7 +390,7 @@ class Fastino(Module):
             sr[1:].eq(sr),
             If(frame.stb,
                 cfg.eq(frame.body),
-                sr.eq(Array([status[i*n_frame:(i + 1)*n_frame]
+                sr.eq(Array([status[i*n_frame//2:(i + 1)*n_frame//2]
                     for i in range(1 << len(adr))])[adr]),
             )
         ]
@@ -402,7 +400,7 @@ class Fastino(Module):
             platform.request("test_point").eq(link.clk_buf),
         ]
         idc = [platform.request("idc", i + 4) for i in range(4)]
-        self.comb += [
+        self.sync += [
             [_.dir.eq(1) for _ in idc],
             [_.io.eq(0) for _ in idc],
             idc[0].io.eq(Cat(
@@ -415,9 +413,8 @@ class Fastino(Module):
                 frame.stb,
                 frame.crc_err[0])),
             #idc[1].io.eq(link.sr.word[0::len(link.sr.data)]),
-            idc[1].io.eq(frame.checksum),
-            idc[2].io.eq(link.sr.word[1::len(link.sr.data)]),
-            idc[3].io.eq(Cat(link.delay, link.delay_relative)),
+            Cat(idc[1].io, idc[2].io).eq(Cat(frame.crc.next, link.delay)),
+            idc[3].io.eq(link.sr.word[1::len(link.sr.data)]),
         ]
 
         cd_spi = ClockDomain("spi")
@@ -452,7 +449,7 @@ class Fastino(Module):
                 p_FDA_RELATIVE=0,
                 i_BYPASS=cfg.bypass,
                 i_RESETB=~(cfg.rst | cd_sys.rst),
-                i_DYNAMICDELAY=Cat(cfg.delay_feedback, cfg.delay_relative),
+                i_DYNAMICDELAY=Cat(link.delay, link.delay_relative),
                 i_REFERENCECLK=link.clk_buf,
                 i_LATCHINPUTVALUE=cfg.latchinputvalue,
                 o_LOCK=locked,
