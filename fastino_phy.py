@@ -7,9 +7,9 @@ from misoc.cores.liteeth_mini.mac.crc import LiteEthMACCRCEngine
 # word: n_clk = 7
 # cyc   0 1 2 3 4 5 6
 # clk0  1 1 0 0 0 1 1
-# clk1 1 1 x 0 0 x 1   # optimal, on edge
-# clk1 1 1 0 0 0 1 1   # late
-# clk1 1 1 1 0 0 0 1   # early
+# clk1   1 x 0 0 x 1 1   # optimal, on edge
+# clk1   1 0 0 0 1 1 1   # late
+# clk1   1 1 0 0 0 1 1   # early
 # n_pay = n_lanes*n_clk = 42
 
 
@@ -17,12 +17,12 @@ class SlipSR(Module):
     def __init__(self, n_lanes=6, n_div=7):
         self.data = Signal(n_lanes)
         self.slip_req = Signal()
-        self.word = Signal(n_div*len(self.data), reset_less=True)
+        self.word = Signal(n_div*n_lanes, reset_less=True)
 
         buf = Signal.like(self.word)
+        slipped = Signal.like(buf)
         clk0 = Signal()
         i = Signal(n_div, reset=1)
-        slipped = Signal.like(buf)
         slip_n = Signal()
         self.sync.sr += [
             buf.eq(Cat(self.data, buf)),
@@ -47,6 +47,12 @@ class Link(Module):
 
         # link clocking
         self.clk_buf = Signal()
+
+        cd_link = ClockDomain("link", reset_less=True)
+        platform.add_period_constraint(cd_link.clk, t_clk*self.n_div)
+        self.clock_domains += cd_link
+        self.comb += cd_link.clk.eq(self.clk_buf)
+
         cd_word = ClockDomain("word")
         platform.add_period_constraint(cd_word.clk, t_clk*self.n_div)
         self.clock_domains += cd_word
@@ -64,8 +70,9 @@ class Link(Module):
 
         # input clock PLL
         locked = Signal()
-        self.delay = Signal(4, reset_less=True)
-        self.delay_relative = Signal(4, reset=0xf, reset_less=True)
+        self.delay = Signal(4, reset=0b1000)
+        self.delay_relative = Signal(4)
+
         self.specials += [
             Instance(
                 "SB_PLL40_2F_CORE",
@@ -90,8 +97,8 @@ class Link(Module):
                 i_LATCHINPUTVALUE=0,
                 o_LOCK=locked,
                 o_PLLOUTGLOBALA=cd_word.clk,
-                # o_PLLOUTCOREA=,
                 o_PLLOUTGLOBALB=cd_sr.clk,
+                # o_PLLOUTCOREA=,
                 # o_PLLOUTCOREB=,
             ),
             AsyncResetSynchronizer(cd_word, ~locked),
@@ -100,77 +107,94 @@ class Link(Module):
         # input PIO registers
         self.submodules.sr = SlipSR(n_lanes=n_lanes + 2, n_div=self.n_div)
 
-        clk_helper = Signal()
+        helper = Signal.like(self.sr.data)
         self.specials += [
             Instance(
                 "SB_GB_IO",
                 p_PIN_TYPE=0b000000,  # no output, i registered
                 p_IO_STANDARD="SB_LVDS_INPUT",
                 i_INPUT_CLK=cd_sr.clk,
-                o_D_IN_0=self.sr.data[0],
-                o_D_IN_1=clk_helper,
+                o_D_IN_1=helper[0],
+                o_D_IN_0=helper[1],
                 o_GLOBAL_BUFFER_OUTPUT=self.clk_buf,
                 i_PACKAGE_PIN=clk,
             ),
-            Instance(  # help timing
+            Instance(
                 "SB_DFFN",
-                i_D=clk_helper,
+                i_D=helper[0],
+                i_C=cd_sr.clk,
+                o_Q=self.sr.data[0],
+            ),
+            Instance(
+                "SB_DFF",
+                i_D=helper[1],
                 i_C=cd_sr.clk,
                 o_Q=self.sr.data[1],
             ),
-            [Instance(
+            [[Instance(
                 "SB_IO",
                 p_PIN_TYPE=0b000000,
                 p_IO_STANDARD="SB_LVDS_INPUT",
                 i_INPUT_CLK=cd_sr.clk,
-                o_D_IN_0=self.sr.data[i + 2],
+                o_D_IN_1=helper[i + 2],
                 i_PACKAGE_PIN=data[i],
-            ) for i in range(n_lanes)]
+            ),
+            Instance(
+                "SB_DFFN",
+                i_D=helper[i + 2],
+                i_C=cd_sr.clk,
+                o_Q=self.sr.data[i + 2],
+            ),
+            ]for i in range(n_lanes)]
         ]
 
         self.payload = Signal(n_lanes*self.n_div)
-        clk0 = Signal(2)
-        clk1 = Signal(2)
+        clk0 = Signal(7)
+        clk1 = Signal(7)
         slip_good = Signal()
         delay_inc = Signal()
         delay_dec = Signal()
-        slip_wait = Signal(4, reset_less=True)  # slip adjustment delay line
-        slip_done = Signal()
+        wait = Signal(6, reset_less=True)  # slip adjustment delay line
+        wait_pending = Signal()
         self.align_err = Signal(8, reset_less=True)
         self.stb = Signal()
 
         n = len(self.sr.data)
         self.comb += [
-            # rising clock samples for bit slip alignment
-            clk0.eq(~Cat(self.sr.word[i*n] for i in (1, 2))),
-            # relevant clock samples for sub-sample delay alignment
-            clk1.eq(~Cat(self.sr.word[1 + i*n] for i in (1, 4))),
-            slip_good.eq(clk0 == 0b01),
-            # early sampling, increase clock delay, decrease feedback delay
-            delay_dec.eq(clk1 == 0b10),
-            # late sampling, decrease clock delay, increase feedback delay
-            delay_inc.eq(clk1 == 0b01),
-            slip_done.eq(~(slip_wait[0] ^ slip_wait[-1])),
-            self.stb.eq(slip_good & slip_done),
+            # EEM inversion
+            clk0.eq(~self.sr.word[::n]),
+            clk1.eq(~self.sr.word[1::n]),
             self.payload.eq(~Cat([self.sr.word[2 + i*n:(i + 1)*n]
                 for i in range(self.n_div)])),
+
+            slip_good.eq(clk0 == 0b1100011),
+            # late sampling, decrease clock delay, increase feedback delay
+            delay_inc.eq(clk1 == 0b1100011),
+            # early sampling, increase clock delay, decrease feedback delay
+            delay_dec.eq(clk1 == 0b1110001),
+            wait_pending.eq(wait[0] ^ wait[-1]),
+            self.stb.eq(slip_good & ~wait_pending),
         ]
         self.sync.word += [
             self.sr.slip_req.eq(0),
             # propagate through slip adjustment delay line
-            slip_wait[1:].eq(slip_wait),
-            If(slip_done,
+            wait[1:].eq(wait),
+            If(~wait_pending,
                 If(~slip_good,
                     self.sr.slip_req.eq(1),
-                    slip_wait[0].eq(~slip_wait[0]),
-                    self.delay.eq(self.delay.reset),
+                    wait[0].eq(~wait[0]),
                     self.align_err.eq(self.align_err + 1),
-                ).Elif(delay_inc & (self.delay != 0xf),
-                    slip_wait[0].eq(~slip_wait[0]),
-                    self.delay.eq(self.delay + 1),
-                ).Elif(delay_dec & (self.delay != 0x0),
-                    slip_wait[0].eq(~slip_wait[0]),
-                    self.delay.eq(self.delay - 1),
+                    self.delay.eq(self.delay.reset),
+                ).Elif(delay_inc,
+                    If(self.delay != 0xf,
+                        wait[0].eq(~wait[0]),
+                        self.delay.eq(self.delay + 1),
+                    )
+                ).Elif(delay_dec,
+                    If(self.delay != 0x0,
+                        wait[0].eq(~wait[0]),
+                        self.delay.eq(self.delay - 1),
+                    )
                 ),
             ),
         ]
@@ -192,26 +216,23 @@ class Frame(Module):
     def __init__(self, n_frame=14):
         n = 7*6
         self.payload = Signal(n)
+        # TODO: invalidate marker, checksum on ~link.stb
         self.submodules.crc = LiteEthMACCRCEngine(
             data_width=n, width=12, polynom=0x80f)  # crc-12 telco
-        self.checksum = checksum = Signal(len(self.crc.last), reset_less=True)
-        self.body = Signal(n_frame*n - n_frame//2 - 1 - len(checksum))
-        self.stb = Signal(reset_less=True)
+        self.checksum = Signal(len(self.crc.last))
+        self.body = Signal(n_frame*n - n_frame//2 - 1 - len(self.checksum))
+        self.stb = Signal()
         self.crc_err = Signal(8, reset_less=True)
-        self.crc_good = crc_good = Signal()
+        self.crc_good = Signal()
+        self.eof_good = Signal()
 
-        marker_good = Signal()
-        self.comb += [
-            self.crc.data.eq(self.payload),
-            self.crc.last.eq(checksum),
-        ]
-
+        eof = Signal()
         frame = Signal(n*n_frame, reset_less=True)
 
         body_ = Cat(
             # checksum
-            frame[len(checksum):n],
-            # marker bits
+            frame[len(self.checksum):n],
+            # skip eof marker bits
             [frame[1 + i*n:(i + 1)*n] for i in range(1, 2 + n_frame//2)],
             # complete words
             frame[(2 + n_frame//2)*n:],
@@ -219,24 +240,22 @@ class Frame(Module):
         assert len(body_) == len(self.body)
 
         self.comb += [
-            crc_good.eq(self.crc.next == 0),
+            self.crc.last.eq(self.checksum),
+            self.crc.data[::-1].eq(self.payload),
             self.body.eq(body_),
+            self.stb.eq(self.eof_good & (self.crc_good)),
+            eof.eq(Cat([frame[i*n] for i in range(1 + n_frame//2)]) == 1),
         ]
         self.sync += [
+            self.crc_good.eq(self.crc.next == 0),
+            self.eof_good.eq(eof),
             frame.eq(Cat(self.payload, frame)),
-            marker_good.eq(Cat(
-                self.payload[0], [frame[i*n] for i in range(n_frame//2)]) == 1),
-            self.stb.eq(0),
-            checksum.eq(self.crc.next),
-            # TODO: invalidate marker, checksum on ~link.stb
-            If(marker_good & ~ResetSignal("word"),
-                checksum.eq(0),
-                self.stb.eq(1),  # TODO: remove
-                If(crc_good,
-                    self.stb.eq(1),
-                ).Else(
-                    self.crc_err.eq(self.crc_err + 1),
-                ),
+            self.checksum.eq(self.crc.next),
+            If(eof,
+                self.checksum.eq(0),
+            ),
+            If(self.eof_good & ~self.crc_good,
+                self.crc_err.eq(self.crc_err + 1),
             ),
         ]
 
@@ -248,17 +267,17 @@ class MultiSPI(Module):
         self.stb = Signal()
 
         vhdci = [platform.request("vhdci", i) for i in range(2)]
-        idc = [platform.request("idc", i) for i in range(4)]
+        #idc = [platform.request("idc", i) for i in range(4)]
         mosi = vhdci[0].io
         cs = vhdci[1].io
         sck = []
         # ldac = []
-        for _ in idc:
-            sck.extend(_.io[i] for i in range(8))
+        #for _ in idc:
+        #    sck.extend(_.io[i] for i in range(8))
             # ldac.extend(_.io[i + 4] for i in range(4))
         self.comb += [
             [_.dir.eq(0b1111) for _ in vhdci],
-            [_.dir.eq(1) for _ in idc],
+        #    [_.dir.eq(1) for _ in idc],
             platform.request("drv_oe_n").eq(0),
         ]
 
@@ -283,7 +302,7 @@ class MultiSPI(Module):
         ]
         ce = Signal(1)
         self.comb += ce.eq(mask != 0)
-        for i in range(8, 16):
+        for i in range(n_channels):
             self.specials += [
                 Instance(
                     "SB_IO",
@@ -354,7 +373,7 @@ class Fastino(Module):
             ("bypass", 1),
             ("latchinputvalue", 1),
             ("reserved", 17),
-        ], reset_less=True)
+        ])
         locked = Signal()
 
         sdo = Signal()
@@ -399,11 +418,13 @@ class Fastino(Module):
             platform.request("user_led").eq(~ResetSignal()),
             platform.request("test_point").eq(link.clk_buf),
         ]
-        idc = [platform.request("idc", i + 4) for i in range(4)]
-        self.sync += [
+        idc = [platform.request("idc", i) for i in range(8)]
+        self.comb += [
             [_.dir.eq(1) for _ in idc],
             [_.io.eq(0) for _ in idc],
-            idc[0].io.eq(Cat(
+            Cat(idc[0].io).eq(Cat(link.delay, link.delay_relative)),
+            Cat(idc[2].io, idc[3].io).eq(link.payload),
+            idc[4].io.eq(Cat(
                 ClockSignal("word"),
                 ResetSignal("word"),
                 link.sr.slip_req,
@@ -413,8 +434,9 @@ class Fastino(Module):
                 frame.stb,
                 frame.crc_err[0])),
             #idc[1].io.eq(link.sr.word[0::len(link.sr.data)]),
-            Cat(idc[1].io, idc[2].io).eq(Cat(frame.crc.next, link.delay)),
-            idc[3].io.eq(link.sr.word[1::len(link.sr.data)]),
+            Cat(idc[5].io).eq(Cat(frame.crc.next)),
+            idc[6].io.eq(link.sr.word[::len(link.sr.data)]),
+            idc[7].io.eq(link.sr.word[1::len(link.sr.data)]),
         ]
 
         cd_spi = ClockDomain("spi")
