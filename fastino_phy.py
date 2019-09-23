@@ -7,9 +7,9 @@ from misoc.cores.liteeth_mini.mac.crc import LiteEthMACCRCEngine
 # word: n_clk = 7
 # cyc   0 1 2 3 4 5 6
 # clk0  1 1 0 0 0 1 1
-# clk1 1 1 x 0 0 x 1   # optimal, on edge
-# clk1 1 1 0 0 0 1 1   # late
-# clk1 1 1 1 0 0 0 1   # early
+# clk1 1 1 x 0 0 x 1  # optimal, on edge
+# clk1 1 1 0 0 0 1 1  # late
+# clk1 1 1 1 0 0 0 1  # early
 # n_pay = n_lanes*n_clk = 42
 
 
@@ -82,10 +82,10 @@ class Link(Module):
                 p_DIVQ=divq,  # vco
                 p_FILTER_RANGE=3,
                 p_SHIFTREG_DIV_MODE=int(self.n_div == 7),  # div-by-7
-                p_DELAY_ADJUSTMENT_MODE_FEEDBACK="DYNAMIC",
-                p_FDA_FEEDBACK=0,
+                p_DELAY_ADJUSTMENT_MODE_FEEDBACK="FIXED",
+                p_FDA_FEEDBACK=0x0,
                 p_DELAY_ADJUSTMENT_MODE_RELATIVE="DYNAMIC",
-                p_FDA_RELATIVE=0,
+                p_FDA_RELATIVE=0xf,
                 p_PLLOUT_SELECT_PORTA="SHIFTREG_0deg",
                 p_PLLOUT_SELECT_PORTB="GENCLK",
                 p_ENABLE_ICEGATE_PORTA=0,
@@ -474,12 +474,12 @@ class Fastino(Module):
                 p_PLLOUT_SELECT="GENCLK",
                 p_ENABLE_ICEGATE=1,
                 p_DELAY_ADJUSTMENT_MODE_FEEDBACK="DYNAMIC",
-                p_FDA_FEEDBACK=0,
+                p_FDA_FEEDBACK=0xf,
                 p_DELAY_ADJUSTMENT_MODE_RELATIVE="DYNAMIC",
-                p_FDA_RELATIVE=0,
+                p_FDA_RELATIVE=0xf,
                 i_BYPASS=cfg.bypass,
                 i_RESETB=~(cfg.rst | cd_sys.rst),
-                i_DYNAMICDELAY=Cat(link.delay, link.delay_relative),
+                i_DYNAMICDELAY=Cat(link.delay[-4:], link.delay_relative[-4:]),
                 i_REFERENCECLK=link.clk_buf,
                 i_LATCHINPUTVALUE=cfg.latchinputvalue,
                 o_LOCK=locked,
