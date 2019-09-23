@@ -7,9 +7,9 @@ from misoc.cores.liteeth_mini.mac.crc import LiteEthMACCRCEngine
 # word: n_clk = 7
 # cyc   0 1 2 3 4 5 6
 # clk0  1 1 0 0 0 1 1
-# clk1   1 x 0 0 x 1 1   # optimal, on edge
-# clk1   1 0 0 0 1 1 1   # late
-# clk1   1 1 0 0 0 1 1   # early
+# clk1 1 1 x 0 0 x 1   # optimal, on edge
+# clk1 1 1 0 0 0 1 1   # late
+# clk1 1 1 1 0 0 0 1   # early
 # n_pay = n_lanes*n_clk = 42
 
 
@@ -70,7 +70,7 @@ class Link(Module):
 
         # input clock PLL
         locked = Signal()
-        self.delay = Signal(4, reset=0b1000)
+        self.delay = Signal(6, reset=0x20)
         self.delay_relative = Signal(4)
 
         self.specials += [
@@ -92,7 +92,7 @@ class Link(Module):
                 p_ENABLE_ICEGATE_PORTB=0,
                 i_BYPASS=0,
                 i_RESETB=1,
-                i_DYNAMICDELAY=Cat(self.delay, self.delay_relative),
+                i_DYNAMICDELAY=Cat(self.delay[-4:], self.delay_relative[-4:]),
                 i_REFERENCECLK=self.clk_buf,
                 i_LATCHINPUTVALUE=0,
                 o_LOCK=locked,
@@ -107,45 +107,53 @@ class Link(Module):
         # input PIO registers
         self.submodules.sr = SlipSR(n_lanes=n_lanes + 2, n_div=self.n_div)
 
-        helper = Signal.like(self.sr.data)
+        helper = Signal(2*(n_lanes + 1))
         self.specials += [
             Instance(
                 "SB_GB_IO",
                 p_PIN_TYPE=0b000000,  # no output, i registered
                 p_IO_STANDARD="SB_LVDS_INPUT",
                 i_INPUT_CLK=cd_sr.clk,
-                o_D_IN_1=helper[0],
-                o_D_IN_0=helper[1],
+                o_D_IN_0=helper[0],  # rising
+                o_D_IN_1=helper[1],  # falling
                 o_GLOBAL_BUFFER_OUTPUT=self.clk_buf,
                 i_PACKAGE_PIN=clk,
             ),
             Instance(
                 "SB_DFFN",
-                i_D=helper[0],
+                i_D=helper[1],
                 i_C=cd_sr.clk,
                 o_Q=self.sr.data[0],
             ),
             Instance(
                 "SB_DFF",
-                i_D=helper[1],
+                i_D=helper[0],
                 i_C=cd_sr.clk,
                 o_Q=self.sr.data[1],
-            ),
-            [[Instance(
+            )
+        ] + [
+            [Instance(
                 "SB_IO",
                 p_PIN_TYPE=0b000000,
                 p_IO_STANDARD="SB_LVDS_INPUT",
                 i_INPUT_CLK=cd_sr.clk,
-                o_D_IN_1=helper[i + 2],
+                o_D_IN_0=helper[2*i + 2],  # rising
+                o_D_IN_1=helper[2*i + 3],  # falling
                 i_PACKAGE_PIN=data[i],
             ),
             Instance(
+                "SB_DFF",
+                i_D=helper[2*i + 2],
+                i_C=cd_sr.clk,
+                o_Q=Signal(),
+            ),
+            Instance(
                 "SB_DFFN",
-                i_D=helper[i + 2],
+                i_D=helper[2*i + 3],
                 i_C=cd_sr.clk,
                 o_Q=self.sr.data[i + 2],
-            ),
-            ]for i in range(n_lanes)]
+            )]
+            for i in range(n_lanes)
         ]
 
         self.payload = Signal(n_lanes*self.n_div)
@@ -154,8 +162,8 @@ class Link(Module):
         slip_good = Signal()
         delay_inc = Signal()
         delay_dec = Signal()
-        wait = Signal(6, reset_less=True)  # slip adjustment delay line
-        wait_pending = Signal()
+        settle = Signal(max=64, reset=63, reset_less=True)  # delay settling timer
+        settle_done = Signal()
         self.align_err = Signal(8, reset_less=True)
         self.stb = Signal()
 
@@ -172,28 +180,28 @@ class Link(Module):
             delay_inc.eq(clk1 == 0b1100011),
             # early sampling, increase clock delay, decrease feedback delay
             delay_dec.eq(clk1 == 0b1110001),
-            wait_pending.eq(wait[0] ^ wait[-1]),
-            self.stb.eq(slip_good & ~wait_pending),
+            settle_done.eq(settle == 0),
+            self.stb.eq(slip_good & settle_done),
         ]
         self.sync.word += [
             self.sr.slip_req.eq(0),
-            # propagate through slip adjustment delay line
-            wait[1:].eq(wait),
-            If(~wait_pending,
+            If(~settle_done,
+                settle.eq(settle - 1),
+            ).Else(
                 If(~slip_good,
                     self.sr.slip_req.eq(1),
-                    wait[0].eq(~wait[0]),
                     self.align_err.eq(self.align_err + 1),
                     self.delay.eq(self.delay.reset),
+                    settle.eq(settle.reset),
                 ).Elif(delay_inc,
-                    If(self.delay != 0xf,
-                        wait[0].eq(~wait[0]),
+                    If(self.delay != (1 << len(self.delay)) - 1,
                         self.delay.eq(self.delay + 1),
+                        settle.eq(settle.reset),
                     )
                 ).Elif(delay_dec,
-                    If(self.delay != 0x0,
-                        wait[0].eq(~wait[0]),
+                    If(self.delay != 0,
                         self.delay.eq(self.delay - 1),
+                        settle.eq(settle.reset),
                     )
                 ),
             ),
@@ -209,7 +217,7 @@ class Link(Module):
 # ...
 # n_frame - 2: marker(1), body(n_pay - 1)
 # n_frame - 1: crc(n_crc = 12), body(n_pay - 12)
-# n_body = n_frame//2*(2*n_pay - 1) - n_crc
+# n_body = n_frame*n_pay - n_frame//2 - 1 - n_crc
 
 
 class Frame(Module):
