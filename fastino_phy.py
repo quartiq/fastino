@@ -4,20 +4,13 @@ from migen import *
 from migen.genlib.cdc import MultiReg, AsyncResetSynchronizer, BlindTransfer
 from misoc.cores.liteeth_mini.mac.crc import LiteEthMACCRCEngine
 
-# word: n_clk = 7
-# cyc   0 1 2 3 4 5 6
-# clk0  1 1 0 0 0 1 1
-# clk1   1 x 0 0 x 1 1  # optimal, on edge
-# clk1   1 0 0 0 1 1 1  # late
-# clk1   1 1 0 0 0 1 1  # early
-# n_pay = n_lanes*n_clk = 42
-
 
 class SlipSR(Module):
     def __init__(self, n_lanes=6, n_div=7):
         self.data = Signal(n_lanes)
         self.slip_req = Signal()
         self.word = Signal(n_div*n_lanes, reset_less=True)
+        # n_word = n_lanes*n_div = 42
 
         buf = Signal.like(self.word)
         slipped = Signal.like(buf)
@@ -114,7 +107,7 @@ class Link(Module):
                 p_PIN_TYPE=0b000000,  # no output, i registered
                 p_IO_STANDARD="SB_LVDS_INPUT",
                 i_INPUT_CLK=cd_sr.clk,
-                o_D_IN_0=helper[0],  # rising
+                o_D_IN_0=self.sr.data[0],  # rising
                 o_D_IN_1=helper[1],  # falling
                 o_GLOBAL_BUFFER_OUTPUT=self.clk_buf,
                 i_PACKAGE_PIN=clk,
@@ -125,33 +118,16 @@ class Link(Module):
                 i_C=cd_sr.clk,
                 o_Q=self.sr.data[1],
             ),
-            Instance(
-                "SB_DFF",
-                i_D=helper[0],
-                i_C=cd_sr.clk,
-                o_Q=self.sr.data[0],
-            )
         ] + [
             [Instance(
                 "SB_IO",
                 p_PIN_TYPE=0b000000,
                 p_IO_STANDARD="SB_LVDS_INPUT",
                 i_INPUT_CLK=cd_sr.clk,
-                o_D_IN_0=helper[2*i + 2],  # rising
-                o_D_IN_1=helper[2*i + 3],  # falling
+                o_D_IN_0=self.sr.data[i + 2],  # rising
+                # o_D_IN_1=,  # falling
+                # TODO: could be used for common/majority edge sampling on all data lanes
                 i_PACKAGE_PIN=data[i],
-            ),
-            Instance(
-                "SB_DFF",
-                i_D=helper[2*i + 2],
-                i_C=cd_sr.clk,
-                o_Q=self.sr.data[i + 2],
-            ),
-            Instance(
-                "SB_DFFN",
-                i_D=helper[2*i + 3],
-                i_C=cd_sr.clk,
-                o_Q=Signal(),
             )]
             for i in range(n_lanes)
         ]
@@ -174,12 +150,18 @@ class Link(Module):
             clk1.eq(~self.sr.word[1::n]),
             self.payload.eq(~Cat([self.sr.word[2 + i*n:(i + 1)*n]
                 for i in range(self.n_div)])),
-
+            # cycle 0 1 2 3 4 5 6
+            # clk0  1 1 0 0 0 1 1
+            # two of the quadrature samples should hit an edge
+            # this is with the timing helper DFFN
+            # clk1 1 1 x 0 0 x 1  # optimal, on edge
+            # clk1 1 1 0 0 0 1 1  # late
+            # clk1 1 1 1 0 0 0 1  # early
             slip_good.eq(clk0 == 0b1100011),
             # late sampling, decrease clock delay, increase feedback delay
-            delay_inc.eq(clk1 == 0b1000111),
+            delay_inc.eq(clk1 == 0b1100011),
             # early sampling, increase clock delay, decrease feedback delay
-            delay_dec.eq(clk1 == 0b1100011),
+            delay_dec.eq(clk1 == 0b1110001),
             settle_done.eq(settle == 0),
             self.stb.eq(slip_good & settle_done),
         ]
@@ -208,18 +190,6 @@ class Link(Module):
         ]
 
 
-# frame: n_frame = 14
-# 0: body(n_pay)
-# ...
-# n_frame//2 - 4: body(n_pay)
-# ...
-# n_frame//2 - 3: marker(1), body(n_pay - 1)
-# ...
-# n_frame - 2: marker(1), body(n_pay - 1)
-# n_frame - 1: crc(n_crc = 12), body(n_pay - 12)
-# n_body = n_frame*n_pay - n_frame//2 - 1 - n_crc
-
-
 class Frame(Module):
     def __init__(self, n_frame=14):
         n = 7*6
@@ -232,10 +202,21 @@ class Frame(Module):
         self.stb = Signal()
         self.crc_err = Signal(8, reset_less=True)
         self.crc_good = Signal()
-        self.eof_good = Signal()
+        eof_good = Signal()
 
         eof = Signal()
         frame = Signal(n*n_frame, reset_less=True)
+
+        # frame: n_frame = 14
+        # 0: body(n_word)
+        # ...
+        # n_frame//2 - 4: body(n_word)
+        # ...
+        # n_frame//2 - 3: marker(1), body(n_word - 1)
+        # ...
+        # n_frame - 2: marker(1), body(n_word - 1)
+        # n_frame - 1: crc(n_crc = 12), body(n_word - 12)
+        # n_body = n_frame*n_word - n_frame//2 - 1 - n_crc
 
         body_ = Cat(
             # checksum
@@ -251,18 +232,17 @@ class Frame(Module):
             self.crc.last.eq(self.checksum),
             self.crc.data[::-1].eq(self.payload),
             self.body.eq(body_),
-            self.stb.eq(self.eof_good & (self.crc_good)),
-            eof.eq(Cat([frame[i*n] for i in range(1 + n_frame//2)]) == 1),
+            self.crc_good.eq(self.crc.next == 0),
         ]
         self.sync += [
-            self.crc_good.eq(self.crc.next == 0),
-            self.eof_good.eq(eof),
+            eof.eq(Cat(self.payload[0], [frame[i*n] for i in range(n_frame//2)]) == 1),
+            self.stb.eq(eof & self.crc_good),
             frame.eq(Cat(self.payload, frame)),
             self.checksum.eq(self.crc.next),
             If(eof,
                 self.checksum.eq(0),
             ),
-            If(self.eof_good & ~self.crc_good,
+            If(eof & ~self.crc_good,
                 self.crc_err.eq(self.crc_err + 1),
             ),
         ]
@@ -275,17 +255,17 @@ class MultiSPI(Module):
         self.stb = Signal()
 
         vhdci = [platform.request("vhdci", i) for i in range(2)]
-        #idc = [platform.request("idc", i) for i in range(4)]
+        idc = [platform.request("idc", i) for i in range(0)]
         mosi = vhdci[0].io
-        cs = vhdci[1].io
-        sck = []
-        # ldac = []
-        #for _ in idc:
-        #    sck.extend(_.io[i] for i in range(8))
-            # ldac.extend(_.io[i + 4] for i in range(4))
+        sck = vhdci[1].io
+        cs = []
+        ldac = []
+        for _ in idc:
+            cs.extend(_.io[i] for i in range(8))
+            ldac.extend(_.io[i + 4] for i in range(4))
         self.comb += [
             [_.dir.eq(0b1111) for _ in vhdci],
-        #    [_.dir.eq(1) for _ in idc],
+            [_.dir.eq(1) for _ in idc],
             platform.request("drv_oe_n").eq(0),
         ]
 
@@ -320,14 +300,14 @@ class MultiSPI(Module):
                     #i_CLOCK_ENABLE=ce,
                     o_PACKAGE_PIN=mosi[i],
                     i_D_OUT_0=csi & sr[i][-1] & mask[i]),
-                Instance(
-                    "SB_IO",
-                    p_PIN_TYPE=C(0b011100, 6),  # output registered inverted
-                    p_IO_STANDARD="SB_LVCMOS",
-                    i_OUTPUT_CLK=ClockSignal("spi"),
-                    #i_CLOCK_ENABLE=ce,
-                    o_PACKAGE_PIN=cs[i],
-                    i_D_OUT_0=csi & mask[i]),
+                #Instance(
+                #    "SB_IO",
+                #    p_PIN_TYPE=C(0b011100, 6),  # output registered inverted
+                #    p_IO_STANDARD="SB_LVCMOS",
+                #    i_OUTPUT_CLK=ClockSignal("spi"),
+                #    #i_CLOCK_ENABLE=ce,
+                #    o_PACKAGE_PIN=cs[i],
+                #    i_D_OUT_0=csi & mask[i]),
                 #Instance(
                 #    "SB_IO",
                 #    p_PIN_TYPE=C(0b011100, 6),  # output registered inverted
@@ -336,15 +316,15 @@ class MultiSPI(Module):
                 #    #i_CLOCK_ENABLE=ce,
                 #    o_PACKAGE_PIN=ldac[i],
                 #    i_D_OUT_0=mask[i]),
-                #Instance(
-                #    "SB_IO",
-                #    p_PIN_TYPE=C(0b010000, 6),  # output registered DDR
-                #    p_IO_STANDARD="SB_LVCMOS",
-                #    i_OUTPUT_CLK=ClockSignal("spi"),
-                #    #i_CLOCK_ENABLE=ce,
-                #    o_PACKAGE_PIN=sck[i],
-                #    i_D_OUT_0=csi & mask[i],
-                #    i_D_OUT_1=0),
+                Instance(
+                    "SB_IO",
+                    p_PIN_TYPE=C(0b010000, 6),  # output registered DDR
+                    p_IO_STANDARD="SB_LVCMOS",
+                    i_OUTPUT_CLK=ClockSignal("spi"),
+                    #i_CLOCK_ENABLE=ce,
+                    o_PACKAGE_PIN=sck[i],
+                    i_D_OUT_0=csi & mask[i],
+                    i_D_OUT_1=0),
             ]
 
 
