@@ -197,7 +197,7 @@ class Frame(Module):
         # TODO: invalidate marker, checksum on ~link.stb
         self.submodules.crc = LiteEthMACCRCEngine(
             data_width=n, width=12, polynom=0x80f)  # crc-12 telco
-        self.checksum = Signal(len(self.crc.last))
+        self.checksum = Signal(len(self.crc.last), reset_less=True)
         self.body = Signal(n_frame*n - n_frame//2 - 1 - len(self.checksum))
         self.stb = Signal()
         self.crc_err = Signal(8, reset_less=True)
