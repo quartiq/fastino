@@ -7,9 +7,9 @@ from misoc.cores.liteeth_mini.mac.crc import LiteEthMACCRCEngine
 # word: n_clk = 7
 # cyc   0 1 2 3 4 5 6
 # clk0  1 1 0 0 0 1 1
-# clk1 1 1 x 0 0 x 1  # optimal, on edge
-# clk1 1 1 0 0 0 1 1  # late
-# clk1 1 1 1 0 0 0 1  # early
+# clk1   1 x 0 0 x 1 1  # optimal, on edge
+# clk1   1 0 0 0 1 1 1  # late
+# clk1   1 1 0 0 0 1 1  # early
 # n_pay = n_lanes*n_clk = 42
 
 
@@ -70,8 +70,8 @@ class Link(Module):
 
         # input clock PLL
         locked = Signal()
-        self.delay = Signal(6, reset=0x20)
-        self.delay_relative = Signal(4)
+        self.delay = Signal(6, reset=0x20, reset_less=True)
+        self.delay_relative = Signal(4, reset_less=True)
 
         self.specials += [
             Instance(
@@ -82,8 +82,8 @@ class Link(Module):
                 p_DIVQ=divq,  # vco
                 p_FILTER_RANGE=3,
                 p_SHIFTREG_DIV_MODE=int(self.n_div == 7),  # div-by-7
-                p_DELAY_ADJUSTMENT_MODE_FEEDBACK="FIXED",
-                p_FDA_FEEDBACK=0x0,
+                p_DELAY_ADJUSTMENT_MODE_FEEDBACK="DYNAMIC",
+                p_FDA_FEEDBACK=0xf,
                 p_DELAY_ADJUSTMENT_MODE_RELATIVE="DYNAMIC",
                 p_FDA_RELATIVE=0xf,
                 p_PLLOUT_SELECT_PORTA="SHIFTREG_0deg",
@@ -123,13 +123,13 @@ class Link(Module):
                 "SB_DFFN",
                 i_D=helper[1],
                 i_C=cd_sr.clk,
-                o_Q=self.sr.data[0],
+                o_Q=self.sr.data[1],
             ),
             Instance(
                 "SB_DFF",
                 i_D=helper[0],
                 i_C=cd_sr.clk,
-                o_Q=self.sr.data[1],
+                o_Q=self.sr.data[0],
             )
         ] + [
             [Instance(
@@ -145,13 +145,13 @@ class Link(Module):
                 "SB_DFF",
                 i_D=helper[2*i + 2],
                 i_C=cd_sr.clk,
-                o_Q=Signal(),
+                o_Q=self.sr.data[i + 2],
             ),
             Instance(
                 "SB_DFFN",
                 i_D=helper[2*i + 3],
                 i_C=cd_sr.clk,
-                o_Q=self.sr.data[i + 2],
+                o_Q=Signal(),
             )]
             for i in range(n_lanes)
         ]
@@ -177,9 +177,9 @@ class Link(Module):
 
             slip_good.eq(clk0 == 0b1100011),
             # late sampling, decrease clock delay, increase feedback delay
-            delay_inc.eq(clk1 == 0b1100011),
+            delay_inc.eq(clk1 == 0b1000111),
             # early sampling, increase clock delay, decrease feedback delay
-            delay_dec.eq(clk1 == 0b1110001),
+            delay_dec.eq(clk1 == 0b1100011),
             settle_done.eq(settle == 0),
             self.stb.eq(slip_good & settle_done),
         ]
