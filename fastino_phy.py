@@ -63,7 +63,7 @@ class Link(Module):
 
         # input clock PLL
         locked = Signal()
-        self.delay = Signal(6, reset=0x20, reset_less=True)
+        self.delay = Signal(4, reset_less=True)
         self.delay_relative = Signal(4, reset_less=True)
 
         self.specials += [
@@ -98,9 +98,9 @@ class Link(Module):
         ]
 
         # input PIO registers
-        self.submodules.sr = SlipSR(n_lanes=n_lanes + 2, n_div=self.n_div)
+        self.submodules.sr = SlipSR(n_lanes=2*(n_lanes + 1), n_div=self.n_div)
 
-        helper = Signal(2*(n_lanes + 1))
+        helper = Signal(n_lanes + 1)
         self.specials += [
             Instance(
                 "SB_GB_IO",
@@ -108,15 +108,15 @@ class Link(Module):
                 p_IO_STANDARD="SB_LVDS_INPUT",
                 i_INPUT_CLK=cd_sr.clk,
                 o_D_IN_0=self.sr.data[0],  # rising
-                o_D_IN_1=helper[1],  # falling
+                o_D_IN_1=helper[0],  # falling
                 o_GLOBAL_BUFFER_OUTPUT=self.clk_buf,
                 i_PACKAGE_PIN=clk,
             ),
             Instance(
                 "SB_DFFN",
-                i_D=helper[1],
+                i_D=helper[0],
                 i_C=cd_sr.clk,
-                o_Q=self.sr.data[1],
+                o_Q=self.sr.data[n_lanes + 1],
             ),
         ] + [
             [Instance(
@@ -124,48 +124,55 @@ class Link(Module):
                 p_PIN_TYPE=0b000000,
                 p_IO_STANDARD="SB_LVDS_INPUT",
                 i_INPUT_CLK=cd_sr.clk,
-                o_D_IN_0=self.sr.data[i + 2],  # rising
-                # o_D_IN_1=,  # falling
-                # TODO: could be used for common/majority edge sampling on all data lanes
+                o_D_IN_0=self.sr.data[i + 1],  # rising
+                o_D_IN_1=helper[i + 1],  # falling
                 i_PACKAGE_PIN=data[i],
+            ),
+            Instance(
+                "SB_DFFN",
+                i_D=helper[i + 1],
+                i_C=cd_sr.clk,
+                o_Q=self.sr.data[n_lanes + i + 2],
             )]
             for i in range(n_lanes)
         ]
 
         self.payload = Signal(n_lanes*self.n_div)
-        clk0 = Signal(7)
-        clk1 = Signal(7)
         slip_good = Signal()
-        delay_inc = Signal()
-        delay_dec = Signal()
+        delay_delta = Signal((7, True))
         settle = Signal(max=64, reset=63, reset_less=True)  # delay settling timer
         settle_done = Signal()
         self.align_err = Signal(8, reset_less=True)
         self.stb = Signal()
 
         n = len(self.sr.data)
+        lanes = [Signal(self.n_div) for i in range(n)]
+
         self.comb += [
+            Cat(lanes).eq(~Cat(self.sr.word[i::n] for i in range(n))),
             # EEM inversion
-            clk0.eq(~self.sr.word[::n]),
-            clk1.eq(~self.sr.word[1::n]),
-            self.payload.eq(~Cat([self.sr.word[2 + i*n:(i + 1)*n]
-                for i in range(self.n_div)])),
-            # cycle 0 1 2 3 4 5 6
-            # clk0  1 1 0 0 0 1 1
-            # two of the quadrature samples should hit an edge
-            # this is with the timing helper DFFN
-            # clk1 1 1 x 0 0 x 1  # optimal, on edge
-            # clk1 1 1 0 0 0 1 1  # late
-            # clk1 1 1 1 0 0 0 1  # early
-            slip_good.eq(clk0 == 0b1100011),
-            # late sampling, decrease clock delay, increase feedback delay
-            delay_inc.eq(clk1 == 0b1100011),
-            # early sampling, increase clock delay, decrease feedback delay
-            delay_dec.eq(clk1 == 0b1110001),
+            self.payload.eq(~Cat(self.sr.word[i*n + 1:i*n + 1 + n_lanes]
+                for i in range(self.n_div))),
             settle_done.eq(settle == 0),
             self.stb.eq(slip_good & settle_done),
         ]
         self.sync.word += [
+            slip_good.eq(lanes[0] == 0b1100011),
+            # this is with the timing helper DFFNs on the edge samples:
+            # edge sample i is half a cycle older than ref sample i
+            # and half a cycle younger than ref sample i + 1
+            delay_delta.eq(sum(
+                # if the two samples before and after the edge sample are the
+                # same, then don't adjust
+                Mux(ref[i + 1] == ref[i], 0,
+                    # if the edge sample matches the sample after the edge
+                    # then sampling is late:
+                    # increment the feedback delay for earlier sampling
+                    Mux(edge[i] == ref[i], 1, (1 << len(delay_delta)) - 1))
+                for ref, edge in zip(lanes[:n_lanes + 1], lanes[n_lanes + 1:])
+                for i in range(self.n_div - 1)
+            )),
+
             self.sr.slip_req.eq(0),
             If(~settle_done,
                 settle.eq(settle - 1),
@@ -173,14 +180,15 @@ class Link(Module):
                 If(~slip_good,
                     self.sr.slip_req.eq(1),
                     self.align_err.eq(self.align_err + 1),
-                    self.delay.eq(self.delay.reset),
                     settle.eq(settle.reset),
-                ).Elif(delay_inc,
+                ),
+                If(delay_delta > 10,
                     If(self.delay != (1 << len(self.delay)) - 1,
                         self.delay.eq(self.delay + 1),
                         settle.eq(settle.reset),
                     )
-                ).Elif(delay_dec,
+                ),
+                If(delay_delta < -10,
                     If(self.delay != 0,
                         self.delay.eq(self.delay - 1),
                         settle.eq(settle.reset),
