@@ -6,11 +6,19 @@ from misoc.cores.liteeth_mini.mac.crc import LiteEthMACCRCEngine
 
 
 class SlipSR(Module):
-    def __init__(self, n_lanes=6, n_div=7):
+    """Shift register deserializer.
+
+    Takes in a couple of fast lanes of serial `data` to be shifted in
+    on the `sr` clock domain and outputs the entire `word` in the `word`
+    domain.
+
+    `slip_request` from the `word` clock domain) performs a bit-slip
+    operation on all lanes by one bit.
+    """
+    def __init__(self, n_lanes, n_div):
         self.data = Signal(n_lanes)
         self.slip_req = Signal()
         self.word = Signal(n_div*n_lanes, reset_less=True)
-        # n_word = n_lanes*n_div = 42
 
         buf = Signal.like(self.word)
         slipped = Signal.like(buf)
@@ -34,20 +42,44 @@ class SlipSR(Module):
 
 
 class Link(Module):
+    """7:1 multi-lane Deserializer.
+
+    3:4 clock duty cycle.
+
+    Creates PLLs and clock domains for serial DDR sampling and shifting (`sr`)
+    and for the `word` clock.
+
+    The word is bit-slipped until the clock matches the desired pattern.
+    The phase of the sample clock is automatically and continuously
+    adjusted until the falling edge samples
+    are equally likely to hit earlier/later rising edge samples.
+
+    Delay taps are 150ps nominal. This is small compared to PLL jitter.
+
+    t_clk=4ns, 250 MHz bit clock
+    """
     def __init__(self, clk, data, platform, t_clk=4.):
         self.n_div = 7
         n_lanes = len(data)
+        # output word
+        self.word = Signal(n_lanes*self.n_div)
+        # clock alignment error counter
+        self.align_err = Signal(8, reset_less=True)
+        # currently tuned sampling delay
+        self.delay = Signal(8, reset=0x80, reset_less=True)
+        # clock aligned, word available
+        self.stb = Signal()
 
         # link clocking
-        cd_link = ClockDomain("link", reset_less=True)
+        cd_link = ClockDomain("link", reset_less=True)  # t_clk*7, 3:4 duty
         platform.add_period_constraint(cd_link.clk, t_clk*self.n_div)
         self.clock_domains += cd_link
 
-        cd_word = ClockDomain("word")
+        cd_word = ClockDomain("word")  # t_clk*7, 1:1 duty
         platform.add_period_constraint(cd_word.clk, t_clk*self.n_div)
         self.clock_domains += cd_word
 
-        cd_sr = ClockDomain("sr", reset_less=True)
+        cd_sr = ClockDomain("sr", reset_less=True)  # t_clk
         self.clock_domains += cd_sr
         divr = 1 - 1
         divf = 1 - 1
@@ -60,9 +92,8 @@ class Link(Module):
 
         # input clock PLL
         locked = Signal()
-        self.delay = Signal(8, reset=0x80, reset_less=True)
-        self.delay_relative = Signal(4, reset_less=True)
 
+        self.delay_relative = Signal(4, reset_less=True)
         self.specials += [
             Instance(
                 "SB_PLL40_2F_CORE",
@@ -109,6 +140,9 @@ class Link(Module):
                 o_GLOBAL_BUFFER_OUTPUT=cd_link.clk,
                 i_PACKAGE_PIN=clk,
             ),
+            # help relax timings a bit to meet the t_clk/2 delay from
+            # negedge sr to posedge sr: easier met in fabric than right after
+            # PIO
             Instance(
                 "SB_DFFN",
                 i_D=helper[0],
@@ -125,6 +159,7 @@ class Link(Module):
                 o_D_IN_1=helper[i + 1],  # falling
                 i_PACKAGE_PIN=data[i],
             ),
+            # relax timing closure
             Instance(
                 "SB_DFFN",
                 i_D=helper[i + 1],
@@ -134,28 +169,35 @@ class Link(Module):
             for i in range(n_lanes)
         ]
 
-        self.payload = Signal(n_lanes*self.n_div)
+        # clock aligned
         slip_good = Signal()
+        # signed number of misaligned edge samples, see below for details
         delay_delta = Signal((7, True))
-        settle = Signal(max=64, reset=63, reset_less=True)  # delay settling timer
+        # timer to block slips and delay adjustments while others are
+        # pending/pll settling
+        settle = Signal(max=64, reset=63, reset_less=True)
         settle_done = Signal()
-        self.align_err = Signal(8, reset_less=True)
-        self.stb = Signal()
 
         n = len(self.sr.data)
         lanes = [Signal(self.n_div) for i in range(n)]
 
         self.comb += [
-            Cat(lanes).eq(Cat(self.sr.word[i::n] for i in range(n))),
-            # EEM inversion
-            self.payload.eq(~Cat(self.sr.word[i*n + 1:i*n + 1 + n_lanes]
+            # transpose link word for delay checking
+            # EEM LVDS pairs are inverted on Banker
+            Cat(lanes).eq(~Cat(self.sr.word[i::n] for i in range(n))),
+            # extract data lane samples
+            self.word.eq(~Cat(self.sr.word[i*n + 1:i*n + 1 + n_lanes]
                 for i in range(self.n_div))),
             settle_done.eq(settle == 0),
             self.stb.eq(slip_good),
-            slip_good.eq(~lanes[0][1:3] == 0b01),
+            slip_good.eq(lanes[0][1:3] == 0b01),
         ]
         self.sync.word += [
-            # this is with the timing helper DFFNs on the edge samples:
+            # delay adjustment:
+            # (indices are bit indices, youngest first,
+            # reversed from clock cycle numbers)
+            # With the timing helper DFFNs on the edge samples (see
+            # above):
             # edge sample i is half a cycle older than ref sample i
             # and half a cycle younger than ref sample i + 1
             delay_delta.eq(sum(
@@ -165,6 +207,8 @@ class Link(Module):
                     # if the edge sample matches the sample after the edge
                     # then sampling is late:
                     # increment the feedback delay for earlier sampling
+                    # (use overflowing addition instead of -1 to evade some
+                    # Mux() signedness issue)
                     Mux(edge[i] == ref[i], 1, (1 << len(delay_delta)) - 1))
                 for ref, edge in zip(lanes[:n_lanes + 1], lanes[n_lanes + 1:])
                 for i in range(self.n_div - 1)
@@ -174,14 +218,17 @@ class Link(Module):
             If(~settle_done,
                 settle.eq(settle - 1),
             ).Else(
+                # slip adjustment and delay adjustment can happen in parallel
+                # share a hold-off timer for convenience
                 If(~slip_good,
                     self.sr.slip_req.eq(1),
                     self.align_err.eq(self.align_err + 1),
                     settle.eq(settle.reset),
                 ),
-                If(delay_delta >= 10,
-                    If(self.delay != 0xff,
+                If(delay_delta >= 10,  # threshold for misaligned edges
+                    If(self.delay != 0xff,  # saturate delay
                         self.delay.eq(self.delay + 1),
+                        # only block if the top bits change
                         If(self.delay[:4] == 0xf,
                             settle.eq(settle.reset),
                         ),
@@ -200,20 +247,18 @@ class Link(Module):
 
 
 class Frame(Module):
+    """Frame alignment, checksum"""
     def __init__(self, n_frame=14):
         n = 7*6
-        self.payload = Signal(n)
-        # TODO: invalidate marker, checksum on ~link.stb
+        # input word from link
+        self.word = Signal(n)
+        checksum = Signal(12, reset_less=True)
         self.submodules.crc = LiteEthMACCRCEngine(
-            data_width=n, width=12, polynom=0x80f)  # crc-12 telco
-        self.checksum = Signal(len(self.crc.last), reset_less=True)
-        self.body = Signal(n_frame*n - n_frame//2 - 1 - len(self.checksum))
+            data_width=n, width=len(checksum), polynom=0x80f)  # crc-12 telco
+        # frame body
+        self.body = Signal(n_frame*n - n_frame//2 - 1 - len(checksum))
         self.stb = Signal()
         self.crc_err = Signal(8, reset_less=True)
-        self.crc_good = Signal()
-
-        eof = Signal()
-        frame = Signal(n*n_frame, reset_less=True)
 
         # frame: n_frame = 14
         # 0: body(n_word)
@@ -226,10 +271,14 @@ class Frame(Module):
         # n_frame - 1: crc(n_crc = 12), body(n_word - 12)
         # n_body = n_frame*n_word - n_frame//2 - 1 - n_crc
 
+        eof = Signal()
+        frame = Signal(n*n_frame, reset_less=True)
+        crc_good = Signal()
+
         body_ = Cat(
-            # checksum
-            frame[len(self.checksum):n],
-            # skip eof marker bits
+            # checksum in the most recent word
+            frame[len(checksum):n],
+            # skip eof marker bits in the next n_frame//2 + 1 words
             [frame[1 + i*n:(i + 1)*n] for i in range(1, 2 + n_frame//2)],
             # complete words
             frame[(2 + n_frame//2)*n:],
@@ -237,27 +286,31 @@ class Frame(Module):
         assert len(body_) == len(self.body)
 
         self.comb += [
-            self.crc.last.eq(self.checksum),
-            self.crc.data[::-1].eq(self.payload),
+            self.crc.last.eq(checksum),
+            # LiteEthMACCRCEngine takes LSB first
+            self.crc.data[::-1].eq(self.word),
             self.body.eq(body_),
-            self.crc_good.eq(self.crc.next == 0),
+            # CRC([x, CRC(x)]) == 0
+            crc_good.eq(self.crc.next == 0),
         ]
         self.sync += [
-            eof.eq(Cat(self.payload[0], [frame[i*n] for i in range(n_frame//2)]) == 1),
-            self.stb.eq(eof & self.crc_good),
-            frame.eq(Cat(self.payload, frame)),
-            self.checksum.eq(self.crc.next),
+            eof.eq(Cat(self.word[0], [frame[i*n] for i in range(n_frame//2)]) == 1),
+            self.stb.eq(eof & crc_good),
+            frame.eq(Cat(self.word, frame)),
+            checksum.eq(self.crc.next),
             If(eof,
-                self.checksum.eq(0),
-            ),
-            If(eof & ~self.crc_good,
-                self.crc_err.eq(self.crc_err + 1),
+                checksum.eq(0),
+                If(~crc_good,
+                    self.crc_err.eq(self.crc_err + 1),
+                ),
             ),
         ]
 
 
 class MultiSPI(Module):
+    """Multi-bus SPI streamer"""
     def __init__(self, platform, n_channels=32, n_bits=16):
+        # SPI cycles=n_bits + 1 cycle for CS deasserted
         n = n_channels*(n_bits + 1)
         self.data = Signal(n)
         self.stb = Signal()
@@ -278,16 +331,19 @@ class MultiSPI(Module):
         ]
 
         self.busy = Signal()
+        # bit counter
         i = Signal(max=n_bits)
+        # SPI data shift registers
         sr = [Signal(n_bits, reset_less=True) for i in range(n_channels)]
-        mask = Signal(n_channels, reset_less=True)
-        assert len(Cat(sr, mask)) == n
+        # SPI bus enable bits
+        enable = Signal(n_channels, reset_less=True)
+        assert len(Cat(sr, enable)) == n
 
         self.sync.spi += [
             [sri[1:].eq(sri) for sri in sr],  # MSB first
             If(~self.busy & self.stb,
                 self.busy.eq(1),
-                Cat(mask, sr).eq(self.data)
+                Cat(enable, sr).eq(self.data)
             ),
             If(self.busy,
                 i.eq(i + 1),
@@ -297,33 +353,9 @@ class MultiSPI(Module):
             ),
         ]
         ce = Signal(1)
-        self.comb += ce.eq(mask != 0)
+        self.comb += ce.eq(enable != 0)
         for i in range(n_channels):
             self.specials += [
-                Instance(
-                    "SB_IO",
-                    p_PIN_TYPE=C(0b010100, 6),  # output registered
-                    p_IO_STANDARD="SB_LVCMOS",
-                    i_OUTPUT_CLK=ClockSignal("spi"),
-                    #i_CLOCK_ENABLE=ce,
-                    o_PACKAGE_PIN=mosi[i],
-                    i_D_OUT_0=self.busy & sr[i][-1] & mask[i]),
-                #Instance(
-                #    "SB_IO",
-                #    p_PIN_TYPE=C(0b011100, 6),  # output registered inverted
-                #    p_IO_STANDARD="SB_LVCMOS",
-                #    i_OUTPUT_CLK=ClockSignal("spi"),
-                #    #i_CLOCK_ENABLE=ce,
-                #    o_PACKAGE_PIN=cs[i],
-                #    i_D_OUT_0=self.busy & mask[i]),
-                #Instance(
-                #    "SB_IO",
-                #    p_PIN_TYPE=C(0b011100, 6),  # output registered inverted
-                #    p_IO_STANDARD="SB_LVCMOS",
-                #    i_OUTPUT_CLK=ClockSignal("spi"),
-                #    #i_CLOCK_ENABLE=ce,
-                #    o_PACKAGE_PIN=ldac[i],
-                #    i_D_OUT_0=mask[i]),
                 Instance(
                     "SB_IO",
                     p_PIN_TYPE=C(0b010000, 6),  # output registered DDR
@@ -331,8 +363,32 @@ class MultiSPI(Module):
                     i_OUTPUT_CLK=ClockSignal("spi"),
                     #i_CLOCK_ENABLE=ce,
                     o_PACKAGE_PIN=sck[i],
-                    i_D_OUT_0=self.busy & mask[i],
+                    i_D_OUT_0=self.busy & enable[i],
                     i_D_OUT_1=0),
+                Instance(
+                    "SB_IO",
+                    p_PIN_TYPE=C(0b010100, 6),  # output registered
+                    p_IO_STANDARD="SB_LVCMOS",
+                    i_OUTPUT_CLK=ClockSignal("spi"),
+                    #i_CLOCK_ENABLE=ce,
+                    o_PACKAGE_PIN=mosi[i],
+                    i_D_OUT_0=self.busy & sr[i][-1] & enable[i]),
+                #Instance(
+                #    "SB_IO",
+                #    p_PIN_TYPE=C(0b011100, 6),  # output registered inverted
+                #    p_IO_STANDARD="SB_LVCMOS",
+                #    i_OUTPUT_CLK=ClockSignal("spi"),
+                #    #i_CLOCK_ENABLE=ce,
+                #    o_PACKAGE_PIN=cs[i],
+                #    i_D_OUT_0=self.busy & enable[i]),
+                #Instance(
+                #    "SB_IO",
+                #    p_PIN_TYPE=C(0b011100, 6),  # output registered inverted
+                #    p_IO_STANDARD="SB_LVCMOS",
+                #    i_OUTPUT_CLK=ClockSignal("spi"),
+                #    #i_CLOCK_ENABLE=ce,
+                #    o_PACKAGE_PIN=ldac[i],
+                #    i_D_OUT_0=enable[i]),
             ]
 
 
@@ -357,9 +413,7 @@ class Fastino(Module):
         # platform.add_period_constraint(cd_sys.clk, t_clk*link.n_div)
 
         self.submodules.frame = Frame()
-        self.comb += [
-            self.frame.payload.eq(self.link.payload),
-        ]
+        self.comb += self.frame.word.eq(self.link.word)
 
         adr = Signal(4)
         cfg = Record([
@@ -370,6 +424,7 @@ class Fastino(Module):
         ])
         locked = Signal()
 
+        # slow MISO lane, TBD
         sdo = Signal()
         self.specials += [
             Instance(
@@ -387,7 +442,9 @@ class Fastino(Module):
                 o_PACKAGE_PIN=platform.request("eem2_n", 7),
                 i_D_OUT_0=sdo),  # falling SCK
         ]
+        # n_frame//2 bits per frame to simplify Kasli DDR PHY design
         sr = Signal(n_frame//2, reset_less=True)
+        # status register
         status = Signal((1 << len(adr))*n_frame//2)
         status_ = Cat(C(0xfa, 8), locked,
                       self.link.delay[-4:], self.link.delay_relative[-4:],
@@ -396,18 +453,20 @@ class Fastino(Module):
 
         self.comb += [
             status.eq(status_),
-            sdo.eq(sr[-1]),
+            sdo.eq(sr[-1]),  # MSB first
             adr.eq(self.frame.body[len(cfg):]),
         ]
         self.sync += [
             sr[1:].eq(sr),
             If(self.frame.stb,
                 cfg.eq(self.frame.body),
+                # grab data from status register according to address
                 sr.eq(Array([status[i*n_frame//2:(i + 1)*n_frame//2]
                     for i in range(1 << len(adr))])[adr]),
             )
         ]
 
+        # set up spi clock to 7*t_clk*3/4 = 21 ns
         cd_spi = ClockDomain("spi")
         self.clock_domains += cd_spi
         divr = 3 - 1
@@ -417,6 +476,9 @@ class Fastino(Module):
         assert t_out >= 20., t_out
         assert t_out < t_clk*self.link.n_div
         platform.add_period_constraint(cd_spi.clk, t_out)
+        # calculate the minimum delay between the 28 ns word clock
+        # and the 21 ns SPI clock: 7ns, if this is large enough we don't need a
+        # synchronizer (see below)
         print("min sys-spi clock delay", min((i*t_out) % (t_clk*self.link.n_div)
             for i in range(1, (divf + 1)//gcd(divr + 1, divf + 1))))
         t_idle = n_frame*t_clk*self.link.n_div - (n_bits + 1)*t_out
@@ -454,24 +516,12 @@ class Fastino(Module):
 
         assert len(cfg) + len(adr) + len(self.spi.data) == len(self.frame.body)
 
-        if False:
-            xfer = BlindTransfer("sys", "spi", len(self.spi.data))
-            assert len(self.spi.data) <= len(self.frame.body)
-            self.submodules += xfer
-            self.comb += [
-                xfer.i.eq(self.frame.stb),
-                xfer.data_i.eq(self.frame.body[-len(xfer.data_i):]),
-                self.spi.stb.eq(xfer.o),
-                self.spi.data.eq(xfer.data_o),
-            ]
-        else:
-            # no cdc, assume timing is comensurate
-            # max data delay <= min clock delay
-            self.comb += [
-                self.spi.stb.eq(self.frame.stb),
-                self.spi.data.eq(self.frame.body[-len(self.spi.data):])
-            ]
-
+        # no cdc, assume timing is comensurate
+        # max data delay < min sys-spi clock delay
+        self.comb += [
+            self.spi.stb.eq(self.frame.stb),
+            self.spi.data.eq(self.frame.body[-len(self.spi.data):])
+        ]
 
         self.comb += [
             platform.request("user_led").eq(~ResetSignal()),
@@ -488,12 +538,11 @@ class Fastino(Module):
                 ClockSignal("word"),
                 ResetSignal("word"),
                 self.link.sr.slip_req,
+                self.link.stb,
                 self.spi.busy,
-                self.frame.crc_good,
                 self.frame.stb,
                 self.frame.crc_err[0])),
         ]
-
 
 
 if __name__ == "__main__":
