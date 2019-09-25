@@ -39,12 +39,9 @@ class Link(Module):
         n_lanes = len(data)
 
         # link clocking
-        self.clk_buf = Signal()
-
         cd_link = ClockDomain("link", reset_less=True)
         platform.add_period_constraint(cd_link.clk, t_clk*self.n_div)
         self.clock_domains += cd_link
-        self.comb += cd_link.clk.eq(self.clk_buf)
 
         cd_word = ClockDomain("word")
         platform.add_period_constraint(cd_word.clk, t_clk*self.n_div)
@@ -63,7 +60,7 @@ class Link(Module):
 
         # input clock PLL
         locked = Signal()
-        self.delay = Signal(4, reset_less=True)
+        self.delay = Signal(8, reset=0x80, reset_less=True)
         self.delay_relative = Signal(4, reset_less=True)
 
         self.specials += [
@@ -86,7 +83,7 @@ class Link(Module):
                 i_BYPASS=0,
                 i_RESETB=1,
                 i_DYNAMICDELAY=Cat(self.delay[-4:], self.delay_relative[-4:]),
-                i_REFERENCECLK=self.clk_buf,
+                i_REFERENCECLK=ClockSignal("link"),
                 i_LATCHINPUTVALUE=0,
                 o_LOCK=locked,
                 o_PLLOUTGLOBALA=cd_word.clk,
@@ -109,7 +106,7 @@ class Link(Module):
                 i_INPUT_CLK=cd_sr.clk,
                 o_D_IN_0=self.sr.data[0],  # rising
                 o_D_IN_1=helper[0],  # falling
-                o_GLOBAL_BUFFER_OUTPUT=self.clk_buf,
+                o_GLOBAL_BUFFER_OUTPUT=cd_link.clk,
                 i_PACKAGE_PIN=clk,
             ),
             Instance(
@@ -149,20 +146,20 @@ class Link(Module):
         lanes = [Signal(self.n_div) for i in range(n)]
 
         self.comb += [
-            Cat(lanes).eq(~Cat(self.sr.word[i::n] for i in range(n))),
+            Cat(lanes).eq(Cat(self.sr.word[i::n] for i in range(n))),
             # EEM inversion
             self.payload.eq(~Cat(self.sr.word[i*n + 1:i*n + 1 + n_lanes]
                 for i in range(self.n_div))),
             settle_done.eq(settle == 0),
-            self.stb.eq(slip_good & settle_done),
+            self.stb.eq(slip_good),
+            slip_good.eq(~lanes[0][1:3] == 0b01),
         ]
         self.sync.word += [
-            slip_good.eq(lanes[0] == 0b1100011),
             # this is with the timing helper DFFNs on the edge samples:
             # edge sample i is half a cycle older than ref sample i
             # and half a cycle younger than ref sample i + 1
             delay_delta.eq(sum(
-                # if the two samples before and after the edge sample are the
+                # if the two reference samples around the edge sample are the
                 # same, then don't adjust
                 Mux(ref[i + 1] == ref[i], 0,
                     # if the edge sample matches the sample after the edge
@@ -182,16 +179,20 @@ class Link(Module):
                     self.align_err.eq(self.align_err + 1),
                     settle.eq(settle.reset),
                 ),
-                If(delay_delta > 10,
-                    If(self.delay != (1 << len(self.delay)) - 1,
+                If(delay_delta >= 10,
+                    If(self.delay != 0xff,
                         self.delay.eq(self.delay + 1),
-                        settle.eq(settle.reset),
+                        If(self.delay[:4] == 0xf,
+                            settle.eq(settle.reset),
+                        ),
                     )
                 ),
-                If(delay_delta < -10,
+                If(delay_delta <= -10,
                     If(self.delay != 0,
                         self.delay.eq(self.delay - 1),
-                        settle.eq(settle.reset),
+                        If(self.delay[:4] == 0x0,
+                            settle.eq(settle.reset),
+                        ),
                     )
                 ),
             ),
@@ -210,7 +211,6 @@ class Frame(Module):
         self.stb = Signal()
         self.crc_err = Signal(8, reset_less=True)
         self.crc_good = Signal()
-        eof_good = Signal()
 
         eof = Signal()
         frame = Signal(n*n_frame, reset_less=True)
@@ -277,7 +277,7 @@ class MultiSPI(Module):
             platform.request("drv_oe_n").eq(0),
         ]
 
-        csi = Signal()
+        self.busy = Signal()
         i = Signal(max=n_bits)
         sr = [Signal(n_bits, reset_less=True) for i in range(n_channels)]
         mask = Signal(n_channels, reset_less=True)
@@ -285,15 +285,15 @@ class MultiSPI(Module):
 
         self.sync.spi += [
             [sri[1:].eq(sri) for sri in sr],  # MSB first
-            If(~csi & self.stb,
-                csi.eq(1),
+            If(~self.busy & self.stb,
+                self.busy.eq(1),
                 Cat(mask, sr).eq(self.data)
             ),
-            If(csi,
+            If(self.busy,
                 i.eq(i + 1),
             ),
             If(i == n_bits - 1,
-                csi.eq(0),
+                self.busy.eq(0),
             ),
         ]
         ce = Signal(1)
@@ -307,7 +307,7 @@ class MultiSPI(Module):
                     i_OUTPUT_CLK=ClockSignal("spi"),
                     #i_CLOCK_ENABLE=ce,
                     o_PACKAGE_PIN=mosi[i],
-                    i_D_OUT_0=csi & sr[i][-1] & mask[i]),
+                    i_D_OUT_0=self.busy & sr[i][-1] & mask[i]),
                 #Instance(
                 #    "SB_IO",
                 #    p_PIN_TYPE=C(0b011100, 6),  # output registered inverted
@@ -315,7 +315,7 @@ class MultiSPI(Module):
                 #    i_OUTPUT_CLK=ClockSignal("spi"),
                 #    #i_CLOCK_ENABLE=ce,
                 #    o_PACKAGE_PIN=cs[i],
-                #    i_D_OUT_0=csi & mask[i]),
+                #    i_D_OUT_0=self.busy & mask[i]),
                 #Instance(
                 #    "SB_IO",
                 #    p_PIN_TYPE=C(0b011100, 6),  # output registered inverted
@@ -331,7 +331,7 @@ class MultiSPI(Module):
                     i_OUTPUT_CLK=ClockSignal("spi"),
                     #i_CLOCK_ENABLE=ce,
                     o_PACKAGE_PIN=sck[i],
-                    i_D_OUT_0=csi & mask[i],
+                    i_D_OUT_0=self.busy & mask[i],
                     i_D_OUT_1=0),
             ]
 
@@ -342,12 +342,11 @@ class Fastino(Module):
         n_frame = 14
         t_clk = 4.
 
-        link = Link(
+        self.submodules.link = Link(
             clk=platform.request("eem2_n", 0),
             data=[platform.request("eem2_n", i + 1) for i in range(6)],
             platform=platform,
             t_clk=t_clk)
-        self.submodules += link
 
         cd_sys = ClockDomain("sys")
         self.clock_domains += cd_sys
@@ -357,10 +356,9 @@ class Fastino(Module):
         ]
         # platform.add_period_constraint(cd_sys.clk, t_clk*link.n_div)
 
-        frame = Frame()
-        self.submodules += frame
+        self.submodules.frame = Frame()
         self.comb += [
-            frame.payload.eq(link.payload),
+            self.frame.payload.eq(self.link.payload),
         ]
 
         adr = Signal(4)
@@ -378,61 +376,36 @@ class Fastino(Module):
                 "SB_IO",
                 p_PIN_TYPE=C(0b010100, 6),  # output registered
                 p_IO_STANDARD="SB_LVCMOS",
-                i_OUTPUT_CLK=cd_sys.clk,
+                i_OUTPUT_CLK=ClockSignal("word"),
                 o_PACKAGE_PIN=platform.request("eem2_p", 7),
                 i_D_OUT_0=sdo),  # falling SCK
             Instance(
                 "SB_IO",
                 p_PIN_TYPE=C(0b011100, 6),  # output registered inverted
                 p_IO_STANDARD="SB_LVCMOS",
-                i_OUTPUT_CLK=cd_sys.clk,
+                i_OUTPUT_CLK=ClockSignal("word"),
                 o_PACKAGE_PIN=platform.request("eem2_n", 7),
                 i_D_OUT_0=sdo),  # falling SCK
         ]
         sr = Signal(n_frame//2, reset_less=True)
         status = Signal((1 << len(adr))*n_frame//2)
         status_ = Cat(C(0xfa, 8), locked,
-                      link.delay, link.delay_relative,
-                      link.align_err, frame.crc_err, cfg.raw_bits())
+                      self.link.delay[-4:], self.link.delay_relative[-4:],
+                      self.link.align_err, self.frame.crc_err, cfg.raw_bits())
         assert len(status_) <= len(status)
 
         self.comb += [
             status.eq(status_),
             sdo.eq(sr[-1]),
-            adr.eq(frame.body[len(cfg):]),
+            adr.eq(self.frame.body[len(cfg):]),
         ]
         self.sync += [
             sr[1:].eq(sr),
-            If(frame.stb,
-                cfg.eq(frame.body),
+            If(self.frame.stb,
+                cfg.eq(self.frame.body),
                 sr.eq(Array([status[i*n_frame//2:(i + 1)*n_frame//2]
                     for i in range(1 << len(adr))])[adr]),
             )
-        ]
-
-        self.comb += [
-            platform.request("user_led").eq(~ResetSignal()),
-            platform.request("test_point").eq(link.clk_buf),
-        ]
-        idc = [platform.request("idc", i) for i in range(8)]
-        self.comb += [
-            [_.dir.eq(1) for _ in idc],
-            [_.io.eq(0) for _ in idc],
-            Cat(idc[0].io).eq(Cat(link.delay, link.delay_relative)),
-            Cat(idc[2].io, idc[3].io).eq(link.payload),
-            idc[4].io.eq(Cat(
-                ClockSignal("word"),
-                ResetSignal("word"),
-                link.sr.slip_req,
-                link.stb,
-                link.align_err[0],
-                frame.crc_good,
-                frame.stb,
-                frame.crc_err[0])),
-            #idc[1].io.eq(link.sr.word[0::len(link.sr.data)]),
-            Cat(idc[5].io).eq(Cat(frame.crc.next)),
-            idc[6].io.eq(link.sr.word[::len(link.sr.data)]),
-            idc[7].io.eq(link.sr.word[1::len(link.sr.data)]),
         ]
 
         cd_spi = ClockDomain("spi")
@@ -440,13 +413,13 @@ class Fastino(Module):
         divr = 3 - 1
         divf = 4 - 1
         divq = 4
-        t_out = t_clk*link.n_div*(divr + 1)/(divf + 1)  # *2**divq
+        t_out = t_clk*self.link.n_div*(divr + 1)/(divf + 1)  # *2**divq
         assert t_out >= 20., t_out
-        assert t_out < t_clk*link.n_div
+        assert t_out < t_clk*self.link.n_div
         platform.add_period_constraint(cd_spi.clk, t_out)
-        print("min sys-spi clock delay", min((i*t_out) % (t_clk*link.n_div)
+        print("min sys-spi clock delay", min((i*t_out) % (t_clk*self.link.n_div)
             for i in range(1, (divf + 1)//gcd(divr + 1, divf + 1))))
-        t_idle = n_frame*t_clk*link.n_div - (n_bits + 1)*t_out
+        t_idle = n_frame*t_clk*self.link.n_div - (n_bits + 1)*t_out
         assert t_idle >= 0, t_idle
         t_vco = t_out/2**divq
         assert .533 <= 1/t_vco <= 1.066, 1/t_vco
@@ -466,9 +439,9 @@ class Fastino(Module):
                 p_DELAY_ADJUSTMENT_MODE_RELATIVE="DYNAMIC",
                 p_FDA_RELATIVE=0xf,
                 i_BYPASS=cfg.bypass,
-                i_RESETB=~(cfg.rst | cd_sys.rst),
-                i_DYNAMICDELAY=Cat(link.delay[-4:], link.delay_relative[-4:]),
-                i_REFERENCECLK=link.clk_buf,
+                i_RESETB=~(cfg.rst | ResetSignal("word")),
+                i_DYNAMICDELAY=Cat(self.link.delay[-4:], self.link.delay_relative[-4:]),
+                i_REFERENCECLK=ClockSignal("link"),
                 i_LATCHINPUTVALUE=cfg.latchinputvalue,
                 o_LOCK=locked,
                 o_PLLOUTGLOBAL=cd_spi.clk,
@@ -477,28 +450,50 @@ class Fastino(Module):
             AsyncResetSynchronizer(cd_spi, ~locked),
         ]
 
-        spi = MultiSPI(platform)
-        self.submodules += spi
+        self.submodules.spi = MultiSPI(platform)
 
-        assert len(cfg) + len(adr) + len(spi.data) == len(frame.body)
+        assert len(cfg) + len(adr) + len(self.spi.data) == len(self.frame.body)
 
         if False:
-            xfer = BlindTransfer("sys", "spi", len(spi.data))
-            assert len(spi.data) <= len(frame.body)
+            xfer = BlindTransfer("sys", "spi", len(self.spi.data))
+            assert len(self.spi.data) <= len(self.frame.body)
             self.submodules += xfer
             self.comb += [
-                xfer.i.eq(frame.stb),
-                xfer.data_i.eq(frame.body[-len(xfer.data_i):]),
-                spi.stb.eq(xfer.o),
-                spi.data.eq(xfer.data_o),
+                xfer.i.eq(self.frame.stb),
+                xfer.data_i.eq(self.frame.body[-len(xfer.data_i):]),
+                self.spi.stb.eq(xfer.o),
+                self.spi.data.eq(xfer.data_o),
             ]
         else:
             # no cdc, assume timing is comensurate
             # max data delay <= min clock delay
             self.comb += [
-                spi.stb.eq(frame.stb),
-                spi.data.eq(frame.body[-len(spi.data):])
+                self.spi.stb.eq(self.frame.stb),
+                self.spi.data.eq(self.frame.body[-len(self.spi.data):])
             ]
+
+
+        self.comb += [
+            platform.request("user_led").eq(~ResetSignal()),
+            platform.request("test_point").eq(ClockSignal("word")),
+        ]
+        idc = [platform.request("idc", i) for i in range(8)]
+        self.comb += [
+            [_.dir.eq(1) for _ in idc],
+            [_.io.eq(0) for _ in idc],
+            Cat(idc[0].io).eq(
+                Cat(self.link.delay[-4:], self.link.delay_relative[-4:])),
+            idc[4].io.eq(Cat(
+                ClockSignal("link"),
+                ClockSignal("word"),
+                ResetSignal("word"),
+                self.link.sr.slip_req,
+                self.spi.busy,
+                self.frame.crc_good,
+                self.frame.stb,
+                self.frame.crc_err[0])),
+        ]
+
 
 
 if __name__ == "__main__":
