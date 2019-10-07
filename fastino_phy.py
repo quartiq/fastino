@@ -315,20 +315,7 @@ class MultiSPI(Module):
         self.data = Signal(n)
         self.stb = Signal()
 
-        vhdci = [platform.request("vhdci", i) for i in range(2)]
-        idc = [platform.request("idc", i) for i in range(0)]
-        mosi = vhdci[0].io
-        sck = vhdci[1].io
-        cs = []
-        ldac = []
-        for _ in idc:
-            cs.extend(_.io[i] for i in range(8))
-            ldac.extend(_.io[i + 4] for i in range(4))
-        self.comb += [
-            [_.dir.eq(0b1111) for _ in vhdci],
-            [_.dir.eq(1) for _ in idc],
-            platform.request("drv_oe_n").eq(0),
-        ]
+        spi = [platform.request("dac", i) for i in range(32)]
 
         self.busy = Signal()
         # bit counter
@@ -362,7 +349,7 @@ class MultiSPI(Module):
                     p_IO_STANDARD="SB_LVCMOS",
                     i_OUTPUT_CLK=ClockSignal("spi"),
                     #i_CLOCK_ENABLE=ce,
-                    o_PACKAGE_PIN=sck[i],
+                    o_PACKAGE_PIN=spi[i].clk,
                     i_D_OUT_0=self.busy & enable[i],
                     i_D_OUT_1=0),
                 Instance(
@@ -371,24 +358,24 @@ class MultiSPI(Module):
                     p_IO_STANDARD="SB_LVCMOS",
                     i_OUTPUT_CLK=ClockSignal("spi"),
                     #i_CLOCK_ENABLE=ce,
-                    o_PACKAGE_PIN=mosi[i],
+                    o_PACKAGE_PIN=spi[i].sdi,
                     i_D_OUT_0=self.busy & sr[i][-1] & enable[i]),
-                #Instance(
-                #    "SB_IO",
-                #    p_PIN_TYPE=C(0b011100, 6),  # output registered inverted
-                #    p_IO_STANDARD="SB_LVCMOS",
-                #    i_OUTPUT_CLK=ClockSignal("spi"),
-                #    #i_CLOCK_ENABLE=ce,
-                #    o_PACKAGE_PIN=cs[i],
-                #    i_D_OUT_0=self.busy & enable[i]),
-                #Instance(
-                #    "SB_IO",
-                #    p_PIN_TYPE=C(0b011100, 6),  # output registered inverted
-                #    p_IO_STANDARD="SB_LVCMOS",
-                #    i_OUTPUT_CLK=ClockSignal("spi"),
-                #    #i_CLOCK_ENABLE=ce,
-                #    o_PACKAGE_PIN=ldac[i],
-                #    i_D_OUT_0=enable[i]),
+                Instance(
+                    "SB_IO",
+                    p_PIN_TYPE=C(0b011100, 6),  # output registered inverted
+                    p_IO_STANDARD="SB_LVCMOS",
+                    i_OUTPUT_CLK=ClockSignal("spi"),
+                    #i_CLOCK_ENABLE=ce,
+                    o_PACKAGE_PIN=spi[i].nss,
+                    i_D_OUT_0=self.busy & enable[i]),
+                Instance(
+                    "SB_IO",
+                    p_PIN_TYPE=C(0b011100, 6),  # output registered inverted
+                    p_IO_STANDARD="SB_LVCMOS",
+                    i_OUTPUT_CLK=ClockSignal("spi"),
+                    #i_CLOCK_ENABLE=ce,
+                    o_PACKAGE_PIN=spi[i].ldacn,
+                    i_D_OUT_0=enable[i]),
             ]
 
 
@@ -399,8 +386,8 @@ class Fastino(Module):
         t_clk = 4.
 
         self.submodules.link = Link(
-            clk=platform.request("eem2_n", 0),
-            data=[platform.request("eem2_n", i + 1) for i in range(6)],
+            clk=platform.request("eem0_p", 0),
+            data=[platform.request("eem0_p", i + 1) for i in range(6)],
             platform=platform,
             t_clk=t_clk)
 
@@ -432,14 +419,14 @@ class Fastino(Module):
                 p_PIN_TYPE=C(0b010100, 6),  # output registered
                 p_IO_STANDARD="SB_LVCMOS",
                 i_OUTPUT_CLK=ClockSignal("word"),
-                o_PACKAGE_PIN=platform.request("eem2_p", 7),
+                o_PACKAGE_PIN=platform.request("eem0_p", 7),
                 i_D_OUT_0=sdo),  # falling SCK
             Instance(
                 "SB_IO",
                 p_PIN_TYPE=C(0b011100, 6),  # output registered inverted
                 p_IO_STANDARD="SB_LVCMOS",
                 i_OUTPUT_CLK=ClockSignal("word"),
-                o_PACKAGE_PIN=platform.request("eem2_n", 7),
+                o_PACKAGE_PIN=platform.request("eem0_n", 7),
                 i_D_OUT_0=sdo),  # falling SCK
         ]
         # n_frame//2 bits per frame to simplify Kasli DDR PHY design
@@ -524,29 +511,27 @@ class Fastino(Module):
         ]
 
         self.comb += [
-            platform.request("user_led").eq(~ResetSignal()),
-            platform.request("test_point").eq(ClockSignal("word")),
-        ]
-        idc = [platform.request("idc", i) for i in range(8)]
-        self.comb += [
-            [_.dir.eq(1) for _ in idc],
-            [_.io.eq(0) for _ in idc],
-            Cat(idc[0].io).eq(
-                Cat(self.link.delay[-4:], self.link.delay_relative[-4:])),
-            idc[4].io.eq(Cat(
+            platform.request("dac_clr_n").eq(1),
+            Cat(platform.request("test_point", i) for i in range(5)).eq(Cat(
                 ClockSignal("link"),
                 ClockSignal("word"),
                 ResetSignal("word"),
                 self.link.sr.slip_req,
+                self.frame.stb,
+            )),
+            Cat(platform.request("user_led", i) for i in range(9)).eq(Cat(
+                ~ResetSignal("word"),
                 self.link.stb,
                 self.spi.busy,
-                self.frame.stb,
-                self.frame.crc_err[0])),
+                self.frame.crc_err[0],
+                self.link.delay[-4:],
+                ~ResetSignal(),  # RED
+            )),
         ]
 
 
 if __name__ == "__main__":
-    from banker import Platform
+    from fastino import Platform
     platform = Platform()
     fastino = Fastino(platform)
     platform.build(fastino, build_name="fastino")
