@@ -13,20 +13,25 @@ _io = [
     ("user_led", 6, Pins("L7"), IOStandard("LVCMOS25")),
     ("user_led", 7, Pins("K5"), IOStandard("LVCMOS25")),
     ("user_led", 8, Pins("F1"), IOStandard("LVCMOS25")),  # RED
-    ("hw_rev", 0, Pins("M7 R6 T15 T13 D8"), IOStandard("LVCMOS33")),
-    ("sw", 0, Pins("K15 B8"), IOStandard("LVCMOS33")),
+
     ("test_point", 0, Pins("P1"), IOStandard("LVCMOS25")),
     ("test_point", 1, Pins("M5"), IOStandard("LVCMOS25")),
     ("test_point", 2, Pins("P2"), IOStandard("LVCMOS25")),
     ("test_point", 3, Pins("N4"), IOStandard("LVCMOS25")),
     ("test_point", 4, Pins("R1"), IOStandard("LVCMOS25")),
 
-    ("cfg_reload", 0, Pins("R16"), IOStandard("LVCMOS33")),
+    ("hw_rev", 0, Pins("R6 R16 T15 T13 D8"), IOStandard("LVCMOS33")),
+    ("sw", 0, Pins("K15 B8"), IOStandard("LVCMOS33")),
     ("cbsel", 0, Pins("K11 P13"), IOStandard("LVCMOS33")),
 
     ("i2c", 0,
         Subsignal("sda", Pins("M15")),
         Subsignal("sda", Pins("J11")),
+        IOStandard("LVCMOS33"),
+    ),
+    ("i2c", 1,
+        Subsignal("sda", Pins("R4")),
+        Subsignal("sda", Pins("M7")),
         IOStandard("LVCMOS33"),
     ),
 
