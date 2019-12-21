@@ -12,30 +12,41 @@ class SlipSR(Module):
     on the `sr` clock domain and outputs the entire `word` in the `word`
     domain.
 
-    `slip_request` from the `word` clock domain) performs a bit-slip
-    operation on all lanes by one bit.
+    `slip_request` (level sensitive, from the `word` clock domain)
+    performs a bit-slip operation on all lanes by one bit. The first
+    slipped word appears between 2 and 3 word clock cycles later.
     """
     def __init__(self, n_lanes, n_div):
         self.data = Signal(n_lanes)
         self.slip_req = Signal()
         self.word = Signal(n_div*n_lanes, reset_less=True)
 
+        # continuously shifting input register
         buf = Signal.like(self.word)
+        # slipped snapshot of buf
         slipped = Signal.like(buf)
+        # delayed word clock
         clk0 = Signal()
+        # work alignment marker, rotating shift register in the sr domain
+        # with a single high bit
         i = Signal(n_div, reset=1)
+        # no slip active
         slip_n = Signal()
         self.sync.sr += [
+            # shift in new data
             buf.eq(Cat(self.data, buf)),
             clk0.eq(ClockSignal("word")),
             slip_n.eq(~(self.slip_req & ClockSignal("word") & ~clk0)),
+            # shift through alignment marker if not slipping
             If(slip_n,
                 i.eq(Cat(i[-1], i)),
             ),
+            # if alignment marker on top, coppy into slipped
             If(i[-1],
                 slipped.eq(buf),
             ),
         ]
+        # in word domain, coppy into output
         self.sync.word += [
             self.word.eq(slipped),
         ]
@@ -46,17 +57,17 @@ class Link(Module):
 
     3:4 clock duty cycle.
 
-    Creates PLLs and clock domains for serial DDR sampling and shifting (`sr`)
-    and for the `word` clock.
+    Creates PLLs and clock domains `sr` for serial DDR sampling and shifting and
+    `word` for the `word` clock.
 
     The word is bit-slipped until the clock matches the desired pattern.
     The phase of the sample clock is automatically and continuously
     adjusted until the falling edge samples
     are equally likely to hit earlier/later rising edge samples.
 
-    Delay taps are 150ps nominal. This is small compared to PLL jitter.
+    Delay taps are 150ps nominal. This is in fact small compared to PLL jitter (~500ps).
 
-    t_clk=4ns, 250 MHz bit clock
+    t_clk=4ns, 250 MHz bit clock, 500 Mb/s DDR sampling for edge alignment
     """
     def __init__(self, clk, data, platform, t_clk=4.):
         self.n_div = 7
@@ -126,10 +137,12 @@ class Link(Module):
         ]
 
         # input PIO registers
+        # 2 bits per lane, data lanes plus one clock lane
         self.submodules.sr = SlipSR(n_lanes=2*(n_lanes + 1), n_div=self.n_div)
 
         helper = Signal(n_lanes + 1)
         self.specials += [
+            # buffer it to the `link` domain and DDR-sample it with the `sr` clock
             Instance(
                 "SB_GB_IO",
                 p_PIN_TYPE=0b000000,  # no output, i registered
@@ -159,7 +172,8 @@ class Link(Module):
                 o_D_IN_1=helper[i + 1],  # falling
                 i_PACKAGE_PIN=data[i],
             ),
-            # relax timing closure
+            # relax timing closure on falling edge samples,
+            # same as clk lane above
             Instance(
                 "SB_DFFN",
                 i_D=helper[i + 1],
@@ -183,13 +197,14 @@ class Link(Module):
 
         self.comb += [
             # transpose link word for delay checking
-            # EEM LVDS pairs are inverted on Banker
+            # EEM LVDS pairs are inverted on Banker, TODO: check
             Cat(lanes).eq(~Cat(self.sr.word[i::n] for i in range(n))),
-            # extract data lane samples
+            # extract data lane samples, TODO: check
             self.word.eq(~Cat(self.sr.word[i*n + 1:i*n + 1 + n_lanes]
                 for i in range(self.n_div))),
             settle_done.eq(settle == 0),
             self.stb.eq(slip_good),
+            # be robust, just look for rising clock edge between 1 and 2
             slip_good.eq(lanes[0][1:3] == 0b01),
         ]
         self.sync.word += [
@@ -233,8 +248,7 @@ class Link(Module):
                             settle.eq(settle.reset),
                         ),
                     )
-                ),
-                If(delay_delta <= -10,
+                ).Elif(delay_delta <= -10,
                     If(self.delay != 0,
                         self.delay.eq(self.delay - 1),
                         If(self.delay[:4] == 0x0,
