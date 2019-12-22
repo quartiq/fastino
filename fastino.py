@@ -4,6 +4,7 @@ from migen.build.lattice import LatticePlatform
 
 _io = [
     ("clk25", 0, Pins("K9"), IOStandard("LVCMOS33")),
+
     ("user_led", 0, Pins("M2"), IOStandard("LVCMOS25")),
     ("user_led", 1, Pins("M3"), IOStandard("LVCMOS25")),
     ("user_led", 2, Pins("N3"), IOStandard("LVCMOS25")),
@@ -43,7 +44,10 @@ _io = [
         IOStandard("LVCMOS33"),
     ),
 
-    # FIXME: yosys/nextpnr get confused if these are not broken up
+    ("dac_clr_n", 4, Pins("A7"), IOStandard("LVCMOS33")),
+    ("en_afe_pwr", 4, Pins("B4"), IOStandard("LVCMOS33")),
+
+    # yosys/nextpnr get confused if these are not broken up
     ("eem0_n", 0, Pins("J5")),
     ("eem0_p", 0, Pins("G1")),
     ("eem0_n", 1, Pins("K4")),
@@ -76,8 +80,6 @@ _io = [
     ("eem1_p", 6, Pins("C2")),
     ("eem1_n", 7, Pins("F5")),
     ("eem1_p", 7, Pins("B1")),
-
-    ("dac_clr_n", 4, Pins("A7"), IOStandard("LVCMOS33")),
 
     ("dac", 0,
         Subsignal("clk", Pins("C3")),
