@@ -75,9 +75,9 @@ class Link(Module):
         # output word
         self.word = Signal(n_lanes*self.n_div)
         # clock alignment error counter
-        self.align_err = Signal(8, reset_less=True)
+        self.align_err = Signal(8)
         # currently tuned sampling delay
-        self.delay = Signal(8, reset=0x80, reset_less=True)
+        self.delay = Signal(4, reset=0x8)
         # clock aligned, word available
         self.stb = Signal()
 
@@ -104,7 +104,7 @@ class Link(Module):
         # input clock PLL
         locked = Signal()
 
-        self.delay_relative = Signal(4, reset_less=True)
+        self.delay_relative = Signal(4)
         self.specials += [
             Instance(
                 "SB_PLL40_2F_CORE",
@@ -124,7 +124,7 @@ class Link(Module):
                 p_ENABLE_ICEGATE_PORTB=0,
                 i_BYPASS=0,
                 i_RESETB=1,
-                i_DYNAMICDELAY=Cat(self.delay[-4:], self.delay_relative[-4:]),
+                i_DYNAMICDELAY=Cat(self.delay, self.delay_relative),
                 i_REFERENCECLK=ClockSignal("link"),
                 i_LATCHINPUTVALUE=0,
                 o_LOCK=locked,
@@ -185,11 +185,15 @@ class Link(Module):
 
         # clock aligned
         slip_good = Signal()
-        # signed number of misaligned edge samples, see below for details
-        delay_delta = Signal((7, True))
+        max_edges = 200
+        # number of edges seen
+        edges = Signal(max=max_edges + len(self.sr.word))
+        # number of edge samples matching the later non-edge value
+        # i.e. number of edge samples biased to late sampling
+        edges_late = Signal.like(edges)
         # timer to block slips and delay adjustments while others are
         # pending/pll settling
-        settle = Signal(max=64, reset=63, reset_less=True)
+        settle = Signal(max=64, reset=63)
         settle_done = Signal()
 
         n = len(self.sr.data)
@@ -215,19 +219,13 @@ class Link(Module):
             # above):
             # edge sample i is half a cycle older than ref sample i
             # and half a cycle younger than ref sample i + 1
-            delay_delta.eq(sum(
-                # if the two reference samples around the edge sample are the
-                # same, then don't adjust
-                Mux(ref[i + 1] == ref[i], 0,
-                    # if the edge sample matches the sample after the edge
-                    # then sampling is late:
-                    # increment the feedback delay for earlier sampling
-                    # (use overflowing addition instead of -1 to evade some
-                    # Mux() signedness issue)
-                    Mux(edge[i] == ref[i], 1, (1 << len(delay_delta)) - 1))
+            edges.eq(edges + sum(ref[i + 1] ^ ref[i]
+                for ref in lanes[:n_lanes + 1]
+                for i in range(self.n_div - 1))),
+            edges_late.eq(edges_late + sum(
+                (ref[i + 1] ^ ref[i]) & ~(edge[i] ^ ref[i])
                 for ref, edge in zip(lanes[:n_lanes + 1], lanes[n_lanes + 1:])
-                for i in range(self.n_div - 1)
-            )),
+                for i in range(self.n_div - 1))),
 
             self.sr.slip_req.eq(0),
             If(~settle_done,
@@ -235,28 +233,31 @@ class Link(Module):
             ).Else(
                 # slip adjustment and delay adjustment can happen in parallel
                 # share a hold-off timer for convenience
+                If(edges >= max_edges,
+                    edges.eq(0),
+                    edges_late.eq(0),
+                    # many late samples
+                    If((edges_late > int(max_edges/2 + 3*max_edges**.5)) &
+                        # saturate delay
+                        (self.delay != 0xf),
+                        # if the edge sample matches the sample after the edge
+                        # then sampling is late:
+                        # increment the feedback delay for earlier sampling
+                        self.delay.eq(self.delay + 1),
+                        settle.eq(settle.reset),
+                    ),
+                    If((edges_late < int(max_edges/2 - 3*max_edges**.5)) &
+                        (self.delay != 0),
+                        self.delay.eq(self.delay - 1),
+                        settle.eq(settle.reset),
+                    ),
+                ),
                 If(~slip_good,
                     self.sr.slip_req.eq(1),
                     self.align_err.eq(self.align_err + 1),
                     settle.eq(settle.reset),
-                ),
-                If(delay_delta >= 10,  # threshold for misaligned edges
-                    If(self.delay != 0xff,  # saturate delay
-                        self.delay.eq(self.delay + 1),
-                        # only block if the top bits change
-                        If(self.delay[:4] == 0xf,
-                            settle.eq(settle.reset),
-                        ),
-                    )
-                ).Elif(delay_delta <= -10,
-                    If(self.delay != 0,
-                        self.delay.eq(self.delay - 1),
-                        If(self.delay[:4] == 0x0,
-                            settle.eq(settle.reset),
-                        ),
-                    )
-                ),
-            ),
+                )
+            )
         ]
 
 
@@ -272,7 +273,7 @@ class Frame(Module):
         # frame body
         self.body = Signal(n_frame*n - n_frame//2 - 1 - len(checksum))
         self.stb = Signal()
-        self.crc_err = Signal(8, reset_less=True)
+        self.crc_err = Signal(8)
 
         # frame: n_frame = 14
         # 0: body(n_word)
@@ -342,19 +343,18 @@ class MultiSPI(Module):
 
         self.sync.spi += [
             [sri[1:].eq(sri) for sri in sr],  # MSB first
-            If(~self.busy & self.stb,
-                self.busy.eq(1),
-                Cat(enable, sr).eq(self.data)
-            ),
             If(self.busy,
                 i.eq(i + 1),
+            ).Elif(self.stb,
+                self.busy.eq(1),
+                Cat(enable, sr).eq(self.data),
+            ).Else(
+                enable.eq(0),
             ),
             If(i == n_bits - 1,
                 self.busy.eq(0),
             ),
         ]
-        ce = Signal(1)
-        self.comb += ce.eq(enable != 0)
         for i in range(n_channels):
             self.specials += [
                 Instance(
@@ -362,35 +362,30 @@ class MultiSPI(Module):
                     p_PIN_TYPE=C(0b010000, 6),  # output registered DDR
                     p_IO_STANDARD="SB_LVCMOS",
                     i_OUTPUT_CLK=ClockSignal("spi"),
-                    #i_CLOCK_ENABLE=ce,
+                    i_CLOCK_ENABLE=enable[i],
                     o_PACKAGE_PIN=spi[i].clk,
-                    i_D_OUT_0=self.busy & enable[i],
-                    i_D_OUT_1=0),
+                    i_D_OUT_0=0,
+                    i_D_OUT_1=self.busy),
                 Instance(
                     "SB_IO",
                     p_PIN_TYPE=C(0b010100, 6),  # output registered
                     p_IO_STANDARD="SB_LVCMOS",
                     i_OUTPUT_CLK=ClockSignal("spi"),
-                    #i_CLOCK_ENABLE=ce,
+                    i_CLOCK_ENABLE=enable[i],
                     o_PACKAGE_PIN=spi[i].sdi,
-                    i_D_OUT_0=self.busy & sr[i][-1] & enable[i]),
+                    i_D_OUT_0=sr[i][-1]),
                 Instance(
                     "SB_IO",
                     p_PIN_TYPE=C(0b011100, 6),  # output registered inverted
                     p_IO_STANDARD="SB_LVCMOS",
                     i_OUTPUT_CLK=ClockSignal("spi"),
-                    #i_CLOCK_ENABLE=ce,
+                    i_CLOCK_ENABLE=enable[i],
                     o_PACKAGE_PIN=spi[i].nss,
-                    i_D_OUT_0=self.busy & enable[i]),
-                Instance(
-                    "SB_IO",
-                    p_PIN_TYPE=C(0b011100, 6),  # output registered inverted
-                    p_IO_STANDARD="SB_LVCMOS",
-                    i_OUTPUT_CLK=ClockSignal("spi"),
-                    #i_CLOCK_ENABLE=ce,
-                    o_PACKAGE_PIN=spi[i].ldacn,
-                    i_D_OUT_0=enable[i]),
+                    i_D_OUT_0=self.busy),
             ]
+            # With LDAC tied permanently low, the rising edge of
+            # CS loads the data to the DAC.
+            self.comb += spi[i].ldacn.eq(0)
 
 
 class Fastino(Module):
@@ -419,11 +414,13 @@ class Fastino(Module):
         adr = Signal(4)
         cfg = Record([
             ("rst", 1),
-            ("bypass", 1),
-            ("latchinputvalue", 1),
-            ("reserved", 17),
+            ("afe_pwr_n", 1),
+            ("dac_clr", 1),
+            ("clr_err", 1),
+            ("led", 8),
+            ("reserved", 8),
         ])
-        locked = Signal()
+        unlock = Signal(reset=1)
 
         # slow MISO lane, TBD
         sdo = Signal()
@@ -443,13 +440,19 @@ class Fastino(Module):
                 o_PACKAGE_PIN=platform.request("eem0_n", 7),
                 i_D_OUT_0=sdo),  # falling SCK
         ]
-        # n_frame//2 bits per frame to simplify Kasli DDR PHY design
-        sr = Signal(n_frame//2, reset_less=True)
+        sr = Signal(n_frame, reset_less=True)
         # status register
-        status = Signal((1 << len(adr))*n_frame//2)
-        status_ = Cat(C(0xfa, 8), locked,
-                      self.link.delay[-4:], self.link.delay_relative[-4:],
-                      self.link.align_err, self.frame.crc_err, cfg.raw_bits())
+        status = Signal((1 << len(adr))*len(sr))
+        status_ = Cat(C(0xfa, 8),  # ID
+                      platform.request("cbsel"),
+                      platform.request("sw"),
+                      platform.request("hw_rev"),
+                      C(0, 3),  # gw version
+                      unlock,
+                      self.link.delay,
+                      self.link.align_err,
+                      self.frame.crc_err,
+                      cfg.raw_bits())
         assert len(status_) <= len(status)
 
         self.comb += [
@@ -457,14 +460,27 @@ class Fastino(Module):
             sdo.eq(sr[-1]),  # MSB first
             adr.eq(self.frame.body[len(cfg):]),
         ]
+        have_crc_err = Signal()
         self.sync += [
             sr[1:].eq(sr),
             If(self.frame.stb,
                 cfg.eq(self.frame.body),
                 # grab data from status register according to address
-                sr.eq(Array([status[i*n_frame//2:(i + 1)*n_frame//2]
+                sr.eq(Array([status[i*n_frame:(i + 1)*n_frame]
                     for i in range(1 << len(adr))])[adr]),
-            )
+            ),
+            If(cfg.clr_err,
+                unlock.eq(0),
+                self.frame.crc_err.eq(0),
+            ),
+            have_crc_err.eq(self.frame.crc_err != 0),
+        ]
+        have_align_err = Signal()
+        self.sync.word += [
+            If(cfg.clr_err,
+                self.link.align_err.eq(0),
+            ),
+            have_align_err.eq(self.link.align_err != 0)
         ]
 
         # set up spi clock to 7*t_clk*3/4 = 21 ns
@@ -487,6 +503,7 @@ class Fastino(Module):
         t_vco = t_out/2**divq
         assert .533 <= 1/t_vco <= 1.066, 1/t_vco
 
+        locked = Signal()
         self.specials += [
             Instance(
                 "SB_PLL40_CORE",
@@ -501,11 +518,11 @@ class Fastino(Module):
                 p_FDA_FEEDBACK=0xf,
                 p_DELAY_ADJUSTMENT_MODE_RELATIVE="DYNAMIC",
                 p_FDA_RELATIVE=0xf,
-                i_BYPASS=cfg.bypass,
+                i_BYPASS=0,
                 i_RESETB=~(cfg.rst | ResetSignal("word")),
-                i_DYNAMICDELAY=Cat(self.link.delay[-4:], self.link.delay_relative[-4:]),
+                i_DYNAMICDELAY=Cat(self.link.delay, self.link.delay_relative),
                 i_REFERENCECLK=ClockSignal("link"),
-                i_LATCHINPUTVALUE=cfg.latchinputvalue,
+                i_LATCHINPUTVALUE=0,
                 o_LOCK=locked,
                 o_PLLOUTGLOBAL=cd_spi.clk,
                 # o_PLLOUTCORE=,
@@ -517,30 +534,43 @@ class Fastino(Module):
 
         assert len(cfg) + len(adr) + len(self.spi.data) == len(self.frame.body)
 
-        # no cdc, assume timing is comensurate
-        # max data delay < min sys-spi clock delay
+        # no cdc, assume timing is comensurate such that
+        # max data delay sys-spi < min sys-spi clock delay over all alignments
         self.comb += [
             self.spi.stb.eq(self.frame.stb),
             self.spi.data.eq(self.frame.body[-len(self.spi.data):])
         ]
 
         self.comb += [
-            platform.request("dac_clr_n").eq(1),
-            Cat(platform.request("test_point", i) for i in range(5)).eq(Cat(
-                ClockSignal("link"),
-                ClockSignal("word"),
-                ResetSignal("word"),
-                self.link.sr.slip_req,
-                self.frame.stb,
-            )),
+            platform.request("dac_clr_n").eq(~cfg.dac_clr),
+            platform.request("en_afe_pwr").eq(~cfg.afe_pwr_n),
+            # platform.request("test_point", 2).eq(ResetSignal("word")),
+            # platform.request("test_point", 3).eq(self.link.sr.slip_req),
+            # platform.request("test_point", 4).eq(self.frame.stb),
             Cat(platform.request("user_led", i) for i in range(9)).eq(Cat(
-                ~ResetSignal("word"),
-                self.link.stb,
-                self.spi.busy,
-                self.frame.crc_err[0],
-                self.link.delay[-4:],
-                ~ResetSignal(),  # RED
+                cfg.led,
+                ResetSignal() | have_align_err | have_crc_err,  # RED
             )),
+        ]
+        self.specials += [
+            Instance(
+                "SB_IO",
+                p_PIN_TYPE=C(0b010000, 6),  # output registered DDR
+                p_IO_STANDARD="SB_LVCMOS",
+                i_OUTPUT_CLK=ClockSignal("link"),
+                i_CLOCK_ENABLE=1,
+                o_PACKAGE_PIN=platform.request("test_point", 0),
+                i_D_OUT_0=1,
+                i_D_OUT_1=0),
+            Instance(
+                "SB_IO",
+                p_PIN_TYPE=C(0b010000, 6),  # output registered DDR
+                p_IO_STANDARD="SB_LVCMOS",
+                i_OUTPUT_CLK=ClockSignal("word"),
+                i_CLOCK_ENABLE=1,
+                o_PACKAGE_PIN=platform.request("test_point", 1),
+                i_D_OUT_0=1,
+                i_D_OUT_1=0),
         ]
 
 
