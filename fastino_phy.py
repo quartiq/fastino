@@ -201,10 +201,8 @@ class Link(Module):
 
         self.comb += [
             # transpose link word for delay checking
-            # EEM LVDS pairs are inverted on Banker, TODO: check
-            Cat(lanes).eq(~Cat(self.sr.word[i::n] for i in range(n))),
-            # extract data lane samples, TODO: check
-            self.word.eq(~Cat(self.sr.word[i*n + 1:i*n + 1 + n_lanes]
+            Cat(lanes).eq(Cat(self.sr.word[i::n] for i in range(n))),
+            self.word.eq(Cat(self.sr.word[i*n + 1:i*n + 1 + n_lanes]
                 for i in range(self.n_div))),
             settle_done.eq(settle == 0),
             self.stb.eq(slip_good),
