@@ -363,7 +363,7 @@ class MultiSPI(Module):
                     i_CLOCK_ENABLE=enable[i],
                     o_PACKAGE_PIN=spi[i].clk,
                     i_D_OUT_0=0,
-                    i_D_OUT_1=self.busy),
+                    i_D_OUT_1=1),
                 Instance(
                     "SB_IO",
                     p_PIN_TYPE=C(0b010100, 6),  # output registered
