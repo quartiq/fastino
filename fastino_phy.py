@@ -544,9 +544,9 @@ class Fastino(Module):
         self.comb += [
             platform.request("dac_clr_n").eq(~cfg.dac_clr),
             platform.request("en_afe_pwr").eq(~cfg.afe_pwr_n),
-            # platform.request("test_point", 2).eq(ResetSignal("word")),
-            # platform.request("test_point", 3).eq(self.link.sr.slip_req),
-            # platform.request("test_point", 4).eq(self.frame.stb),
+            platform.request("test_point", 2).eq(self.link.stb),
+            platform.request("test_point", 3).eq(self.link.sr.slip_req),
+            platform.request("test_point", 4).eq(self.frame.stb),
             Cat(platform.request("user_led", i) for i in range(9)).eq(Cat(
                 cfg.led,
                 ResetSignal() | have_align_err | have_crc_err,  # RED
