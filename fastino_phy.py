@@ -357,16 +357,16 @@ class MultiSPI(Module):
             self.specials += [
                 Instance(
                     "SB_IO",
-                    p_PIN_TYPE=C(0b010000, 6),  # output registered DDR
+                    p_PIN_TYPE=C(0b110000, 6),  # output registered DDR
                     p_IO_STANDARD="SB_LVCMOS",
                     i_OUTPUT_CLK=ClockSignal("spi"),
                     i_CLOCK_ENABLE=enable[i],
                     o_PACKAGE_PIN=spi[i].clk,
                     i_D_OUT_0=0,
-                    i_D_OUT_1=1),
+                    i_D_OUT_1=self.busy),
                 Instance(
                     "SB_IO",
-                    p_PIN_TYPE=C(0b010100, 6),  # output registered
+                    p_PIN_TYPE=C(0b110100, 6),  # output registered
                     p_IO_STANDARD="SB_LVCMOS",
                     i_OUTPUT_CLK=ClockSignal("spi"),
                     i_CLOCK_ENABLE=enable[i],
@@ -374,7 +374,7 @@ class MultiSPI(Module):
                     i_D_OUT_0=sr[i][-1]),
                 Instance(
                     "SB_IO",
-                    p_PIN_TYPE=C(0b011100, 6),  # output registered inverted
+                    p_PIN_TYPE=C(0b111100, 6),  # output registered inverted
                     p_IO_STANDARD="SB_LVCMOS",
                     i_OUTPUT_CLK=ClockSignal("spi"),
                     i_CLOCK_ENABLE=enable[i],
@@ -542,8 +542,8 @@ class Fastino(Module):
         self.comb += [
             platform.request("dac_clr_n").eq(~cfg.dac_clr),
             platform.request("en_afe_pwr").eq(~cfg.afe_pwr_n),
-            platform.request("test_point", 2).eq(self.link.stb),
-            platform.request("test_point", 3).eq(self.link.sr.slip_req),
+            platform.request("test_point", 2).eq(self.link.delay[0]),
+            platform.request("test_point", 3).eq(self.link.delay[1]),
             platform.request("test_point", 4).eq(self.frame.stb),
             Cat(platform.request("user_led", i) for i in range(9)).eq(Cat(
                 cfg.led,
