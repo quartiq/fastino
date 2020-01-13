@@ -464,7 +464,7 @@ class Fastino(Module):
         self.sync += [
             sr[1:].eq(sr),
             If(self.frame.stb,
-                cfg.eq(self.frame.body),
+                cfg.raw_bits().eq(self.frame.body),
                 # grab data from status register according to address
                 sr.eq(Array([status[i*n_frame:(i + 1)*n_frame]
                     for i in range(1 << len(adr))])[adr]),
