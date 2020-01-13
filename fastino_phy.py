@@ -339,6 +339,7 @@ class MultiSPI(Module):
         enable = Signal(n_channels, reset_less=True)
         assert len(Cat(enable, sr)) == n
 
+        enable0 = Signal.like(enable)
         self.sync.spi += [
             [sri[1:].eq(sri) for sri in sr],  # MSB first
             If(self.busy,
@@ -351,6 +352,7 @@ class MultiSPI(Module):
                 enable.eq(0),
                 self.busy.eq(0),
             ),
+            enable0.eq(enable),
         ]
         for i in range(n_channels):
             self.specials += [
@@ -362,7 +364,7 @@ class MultiSPI(Module):
                     #i_CLOCK_ENABLE=enable[i],
                     o_PACKAGE_PIN=spi[i].clk,
                     i_D_OUT_0=0,
-                    i_D_OUT_1=enable[i]),
+                    i_D_OUT_1=enable0[i]),
                 Instance(
                     "SB_IO",
                     p_PIN_TYPE=C(0b010100, 6),  # output registered
@@ -541,8 +543,9 @@ class Fastino(Module):
         self.comb += [
             platform.request("dac_clr_n").eq(~cfg.dac_clr),
             platform.request("en_afe_pwr").eq(~cfg.afe_pwr_n),
-            platform.request("test_point", 2).eq(self.link.delay[0]),
-            platform.request("test_point", 3).eq(self.link.delay[1]),
+            #platform.request("test_point", 2).eq(self.link.delay[0]),
+            #platform.request("test_point", 3).eq(self.link.delay[1]),
+            platform.request("test_point", 3).eq(self.spi.busy),
             platform.request("test_point", 4).eq(self.frame.stb),
             Cat(platform.request("user_led", i) for i in range(9)).eq(Cat(
                 cfg.led,
