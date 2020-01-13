@@ -342,14 +342,13 @@ class MultiSPI(Module):
         enable0 = Signal.like(enable)
         self.sync.spi += [
             [sri[1:].eq(sri) for sri in sr],  # MSB first
-            If(self.busy,
-                i.eq(i + 1),
-            ),
             If(i == n_bits - 1,
                 enable.eq(0),
                 self.busy.eq(0),
             ),
-            If(self.stb,
+            If(self.busy,
+                i.eq(i + 1),
+            ).Elif(self.stb,
                 self.busy.eq(1),
                 Cat(enable, sr).eq(self.data),
             ),
