@@ -3,6 +3,10 @@
 * Fastino is a 32 channels, 2 M/s simultaneous, 16 bit DAC
 * [AD5542ABCPZ](https://www.analog.com/media/en/technical-documentation/data-sheets/AD5512A_5542A.pdf)
 
+## Hardware
+
+Hardware https://github.com/sinara-hw/Fastino/wiki
+
 ## Link
 
 * Interface: single EEM
@@ -31,10 +35,6 @@
 * Link training (bit slip, delay alignment) is automatic
 * Checksum protects the data
 
-## Banker PHY prototype
-
-Hardware https://github.com/sinara-hw/Banker/wiki
-
 ### Tools
 
 * migen
@@ -43,6 +43,8 @@ Hardware https://github.com/sinara-hw/Banker/wiki
 
 ### Build
 
+* Path migen to use the `heap` placer in `nextpnr`
+
 ```
 python fastino_phy.py
 ```
@@ -50,3 +52,12 @@ python fastino_phy.py
 ### FLash
 
 See https://github.com/quartiq/kasli-i2c
+
+Figure out the `aa-bb-cc-dd-ee-ff` mac address of the Kasli connected. Otherwise
+if you are using a Kasli that was not provisioned using the tools in `kasli-i2c`,
+patch `flash_fastino.py` to make it find your Kasli. Assuming Fastino is
+connected to EEM0:
+
+```
+python flash_fastino.py aa-bb-cc-dd-ee-ff EEM0 write fastino.bin
+```
