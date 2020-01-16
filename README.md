@@ -20,7 +20,7 @@ Hardware https://github.com/sinara-hw/Fastino/wiki
     * MISO return data at 125/7 Mb/s (TBD)
 * Each word (one word clock cycle with 7 bits per lane) is `7*6=42` bits.
 * A frame consists of 14 words.
-* A frame contains 8 marker bits to provide EOF alignment and a 12 bit CRC.
+* A frame contains 14/2+1 marker bits to provide EOF alignment and a 12 bit CRC.
 * This leaves 568 bits per frame for `32*16` bits DAC data, a 32 bit channel
   mask, and 24 bits for configuration and return data addressing
 * On 6 data lanes, this achieves 1.5 Gb/s raw from the FPGA and 1.45 Gb/s
