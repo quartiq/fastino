@@ -185,9 +185,11 @@ class Link(Module):
 
         # clock aligned
         slip_good = Signal()
-        max_edges = 200
-        # number of edges seen
-        edges = Signal(max=max_edges + len(self.sr.word))
+        mean_edges = 1 << 6
+        sigma_edges = 6*mean_edges**.5
+        assert mean_edges > sigma_edges  # need SNR
+        # number of edges seen, one word headroom
+        edges = Signal(max=2*mean_edges + len(self.sr.word))
         # number of edge samples matching the later non-edge value
         # i.e. number of edge samples biased to late sampling
         edges_late = Signal.like(edges)
@@ -231,11 +233,11 @@ class Link(Module):
             ).Else(
                 # slip adjustment and delay adjustment can happen in parallel
                 # share a hold-off timer for convenience
-                If(edges >= max_edges,
+                If(edges >= 2*mean_edges,
                     edges.eq(0),
                     edges_late.eq(0),
                     # many late samples
-                    If((edges_late > int(max_edges/2 + 3*max_edges**.5)) &
+                    If((edges_late >= int(mean_edges + sigma_edges)) &
                         # saturate delay
                         (self.delay != 0xf),
                         # if the edge sample matches the sample after the edge
@@ -244,7 +246,8 @@ class Link(Module):
                         self.delay.eq(self.delay + 1),
                         settle.eq(settle.reset),
                     ),
-                    If((edges_late < int(max_edges/2 - 3*max_edges**.5)) &
+                    # few late samples
+                    If((edges_late < int(mean_edges - sigma_edges)) &
                         (self.delay != 0),
                         self.delay.eq(self.delay - 1),
                         settle.eq(settle.reset),
@@ -558,7 +561,7 @@ class Fastino(Module):
                 p_PIN_TYPE=C(0b010000, 6),  # output registered DDR
                 p_IO_STANDARD="SB_LVCMOS",
                 i_OUTPUT_CLK=ClockSignal("link"),
-                i_CLOCK_ENABLE=1,
+                #i_CLOCK_ENABLE=1,
                 o_PACKAGE_PIN=platform.request("test_point", 0),
                 i_D_OUT_0=1,
                 i_D_OUT_1=0),
@@ -567,7 +570,7 @@ class Fastino(Module):
                 p_PIN_TYPE=C(0b010000, 6),  # output registered DDR
                 p_IO_STANDARD="SB_LVCMOS",
                 i_OUTPUT_CLK=ClockSignal("word"),
-                i_CLOCK_ENABLE=1,
+                #i_CLOCK_ENABLE=1,
                 o_PACKAGE_PIN=platform.request("test_point", 1),
                 i_D_OUT_0=1,
                 i_D_OUT_1=0),
