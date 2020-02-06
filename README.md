@@ -34,6 +34,7 @@ Hardware https://github.com/sinara-hw/Fastino/wiki
 * The Link design can be reused for Humpback and Banker where the same FPGA sits on the EEM.
 * Link training (bit slip, delay alignment) is automatic
 * Checksum protects the data
+* Due to the beat between the 7x4 ns word clock and the 21 ns SPI clock, there is a deterministic jitter in the DAC conversion with an amplitude of 7 ns and a period of 3 samples.
 
 ### Tools
 
