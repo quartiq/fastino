@@ -39,18 +39,20 @@ Hardware https://github.com/sinara-hw/Fastino/wiki
 ### Tools
 
 * migen
+* misoc
 * yosys
 * nextpnr
+* icestorm
 
 ### Build
 
-* Path migen to use the `heap` placer in `nextpnr`
+* If using an old nextpnr version, patch migen to use the `heap` placer
 
 ```
 python fastino_phy.py
 ```
 
-### FLash
+### Flash
 
 See https://github.com/quartiq/kasli-i2c
 
