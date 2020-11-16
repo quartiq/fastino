@@ -1,3 +1,5 @@
+[![QUARTIQ Matrix Chat](https://img.shields.io/matrix/quartiq:matrix.org)](https://matrix.to/#/#quartiq:matrix.org)
+
 # Fastino gateware and software development
 
 * Fastino is a 32 channels, 2 M/s simultaneous, 16 bit DAC
