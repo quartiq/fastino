@@ -333,11 +333,11 @@ class MultiSPI(Module):
         self.stb = Signal()
 
         spi_cic = ClockDomainsRenamer("spi")(CIC)
-        self.submodules.cic0 = spi_cic(order=3, rate_width=9, channels=16)
-        self.submodules.cic1 = spi_cic(order=3, rate_width=9, channels=16)
+        self.submodules.cic0 = spi_cic(order=3, rate_width=16, channels=16)
+        self.submodules.cic1 = spi_cic(order=3, rate_width=16, channels=16)
         self.comb += [
-            self.cic0.rate.eq((1 << 9) - 1),
-            self.cic0.gain_shift.eq(3*9),
+            self.cic0.rate.eq((1 << 16) - 1),
+            self.cic0.gain_shift.eq(3*16),
             self.cic1.rate.eq(self.cic0.rate),
             self.cic1.gain_shift.eq(self.cic0.gain_shift),
         ]
