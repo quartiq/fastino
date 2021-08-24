@@ -3,6 +3,7 @@ from math import gcd
 from migen import *
 from migen.genlib.cdc import MultiReg, AsyncResetSynchronizer, BlindTransfer
 from misoc.cores.liteeth_mini.mac.crc import LiteEthMACCRCEngine
+from cic import CIC
 
 
 class SlipSR(Module):
@@ -331,6 +332,18 @@ class MultiSPI(Module):
         self.data = Signal(n)
         self.stb = Signal()
 
+        spi_cic = ClockDomainsRenamer("spi")(CIC)
+        self.submodules.cic0 = spi_cic(order=3, rate_width=9, channels=16)
+        self.submodules.cic1 = spi_cic(order=3, rate_width=9, channels=16)
+        self.comb += [
+            self.cic0.rate.eq((1 << 9) - 1),
+            self.cic0.gain_shift.eq(3*9),
+            self.cic1.rate.eq(self.cic0.rate),
+            self.cic1.gain_shift.eq(self.cic0.gain_shift),
+        ]
+        data_a = [Signal((n_bits, True)) for _ in range(32)]
+        data_b = [Signal((n_bits, True)) for _ in range(32)]
+
         spi = [platform.request("dac", i) for i in range(32)]
 
         self.busy = Signal()
@@ -349,11 +362,16 @@ class MultiSPI(Module):
                 enable.eq(0),
                 self.busy.eq(0),
             ),
+            self.cic0.x.eq(Array(data_a[:16])[self.cic0.xi]),
+            self.cic1.x.eq(Array(data_a[16:])[self.cic1.xi]),
+            Array(data_b[:16])[self.cic0.yi].eq(self.cic0.y),
+            Array(data_b[16:])[self.cic1.yi].eq(self.cic1.y),
             If(self.busy,
                 i.eq(i + 1),
             ).Elif(self.stb,
                 self.busy.eq(1),
-                Cat(enable, sr).eq(self.data),
+                Cat(enable, data_a).eq(self.data),
+                Cat(sr).eq(Cat(data_b)),
             ),
             enable0.eq(enable),
         ]
