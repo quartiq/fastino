@@ -324,6 +324,36 @@ class Frame(Module):
         ]
 
 
+class Interpolator(Module):
+    def __init__(self, n_channels=32, n_bits=16):
+        self.rate = Signal(5, reset=16)
+        self.submodules.cic0 = CIC(width=n_bits, order=3,
+                rate_width=1 << len(self.rate) - 1, channels=n_channels//2)
+        self.submodules.cic1 = CIC(width=n_bits, order=3,
+                rate_width=1 << len(self.rate) - 1, channels=n_channels//2)
+        rate0 = Signal.like(self.rate)
+        self.sync += [
+            self.cic0.rate.eq(Array([(1 << i) - 1 for i in range(17)])[self.rate]),
+            self.cic0.gain_shift.eq(3*(self.rate + 1)),
+            If(self.rate != rate0,
+                self.cic0.rate_stb.eq(1),
+            ),
+        ]
+        self.comb += [
+            self.cic1.rate_stb.eq(self.cic0.rate_stb),
+            self.cic1.rate.eq(self.cic0.rate),
+            self.cic1.gain_shift.eq(self.cic0.gain_shift),
+        ]
+        self.x = [Signal((n_bits, True)) for _ in range(n_channels)]
+        self.y = [Signal((n_bits, True)) for _ in range(n_channels)]
+        self.sync += [
+            self.cic0.x.eq(Array(self.x[:16])[self.cic0.xi]),
+            self.cic1.x.eq(Array(self.x[16:])[self.cic1.xi]),
+            Array(self.y[:16])[self.cic0.yi].eq(self.cic0.y),
+            Array(self.y[16:])[self.cic1.yi].eq(self.cic1.y),
+        ]
+
+
 class MultiSPI(Module):
     """Multi-bus SPI streamer"""
     def __init__(self, platform, n_channels=32, n_bits=16):
@@ -331,18 +361,6 @@ class MultiSPI(Module):
         n = n_channels*(n_bits + 1)
         self.data = Signal(n)
         self.stb = Signal()
-
-        spi_cic = ClockDomainsRenamer("spi")(CIC)
-        self.submodules.cic0 = spi_cic(order=3, rate_width=16, channels=16)
-        self.submodules.cic1 = spi_cic(order=3, rate_width=16, channels=16)
-        self.comb += [
-            self.cic0.rate.eq((1 << 16) - 1),
-            self.cic0.gain_shift.eq(3*16),
-            self.cic1.rate.eq(self.cic0.rate),
-            self.cic1.gain_shift.eq(self.cic0.gain_shift),
-        ]
-        data_a = [Signal((n_bits, True)) for _ in range(32)]
-        data_b = [Signal((n_bits, True)) for _ in range(32)]
 
         spi = [platform.request("dac", i) for i in range(32)]
 
@@ -362,16 +380,11 @@ class MultiSPI(Module):
                 enable.eq(0),
                 self.busy.eq(0),
             ),
-            self.cic0.x.eq(Array(data_a[:16])[self.cic0.xi]),
-            self.cic1.x.eq(Array(data_a[16:])[self.cic1.xi]),
-            Array(data_b[:16])[self.cic0.yi].eq(self.cic0.y),
-            Array(data_b[16:])[self.cic1.yi].eq(self.cic1.y),
             If(self.busy,
                 i.eq(i + 1),
             ).Elif(self.stb,
                 self.busy.eq(1),
-                Cat(enable, data_a).eq(self.data),
-                Cat(sr).eq(Cat(data_b)),
+                Cat(enable, sr).eq(self.data),
             ),
             enable0.eq(enable),
         ]
@@ -550,6 +563,8 @@ class Fastino(Module):
             AsyncResetSynchronizer(cd_spi, ~locked),
         ]
 
+        self.submodules.int = ClockDomainsRenamer("spi")(Interpolator)()
+
         self.submodules.spi = MultiSPI(platform)
 
         assert len(cfg) + len(adr) + len(self.spi.data) == len(self.frame.body)
@@ -558,7 +573,11 @@ class Fastino(Module):
         # max data delay sys-spi < min sys-spi clock delay over all alignments
         self.comb += [
             self.spi.stb.eq(self.frame.stb),
-            self.spi.data.eq(self.frame.body[-len(self.spi.data):])
+            #self.spi.data.eq(self.frame.body[-len(self.spi.data):])
+            Cat(self.int.x).eq(self.frame.body[-len(Cat(self.int.x)):]),
+            Cat(self.spi.data).eq(Cat(
+                self.frame.body[-len(self.spi.data):][:32], self.int.y)),
+            self.int.rate.eq(cfg.reserved),
         ]
 
         self.comb += [
