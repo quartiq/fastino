@@ -10,13 +10,16 @@ from migen import *
 
 # TODO
 # [x] proper reset sequencing
-# [ ] non-power-of-two number of channels
-# [ ] pipe draining (when channel number != cycle length)
-# [ ] check ice40 ebr mapping/mask
-# [ ] Fastino integration resource usage (clock domain (spi 2x16ch or word 3x11ch))
+# [x] check ice40 ebr mapping/mask
+# [x] resource usage (clock domain (spi 2x16ch or word 3x11ch))
+# [ ] Fastino integration, with bypass
 # [ ] per channel interpolation rates
-# ([ ] possibly rate change/reset sequencing with output hold and settling)
-# ([ ] possibly n-by-m channels (iter-by-parallel) and a single BRAM)
+# ([ ] pipe draining: not possible/not required)
+# ([ ] non-power-of-two number of channels: not necessary)
+# ([ ] rate change/reset sequencing with output integrator
+#     forced update: not necessary)
+# ([ ] possibly n-by-m channels (iter-by-parallel) and a single BRAM:
+#     not necessary)
 
 
 class CIC(Module):
@@ -55,7 +58,7 @@ class CIC(Module):
 
         channel = Signal(max=channels)
         rate_cnt = Signal(rate_width)
-        we = Signal(order)
+        we = Signal(1 + order)
         rst = Signal(2*order)
 
         self.sync += [
@@ -106,11 +109,13 @@ class CIC(Module):
         #   0: read addr; 1: comb_r, old z, and z1 store, 2: new z and comb_w write-back
         self.comb += [
             Cat(comb_r, integ_r).eq(mem_r.dat_r),
-            mem_r.adr.eq(channel + 2),
+            mem_r.adr.eq(channel + 2),  # offset by 1 for simplicity
             mem_w.dat_w.eq(Cat(comb_w, integ_w)),
-            mem_w.adr.eq(channel),
-            mem_w.we.eq(Cat([Replicate(we[n], w) for n, w in enumerate(comb)],
-                            Replicate(1, sum(integ)))),
+            mem_w.adr.eq(channel),  # offset by 1 for simplicity
+            mem_w.we.eq(Cat(
+                [Replicate(we[n + 1], w) for n, w in enumerate(comb)],
+                Replicate(1, sum(integ))
+            )),
             self.xi.eq(channel),
             self.x_ack.eq(we[0]),
             self.yi.eq(channel - 2*order),  # 2*order pipeline latency
@@ -119,16 +124,16 @@ class CIC(Module):
 
         z = self.x
         for i, (cr, cw) in enumerate(zip(comb_r, comb_w)):
-            self.comb += cw.eq(z)
-            z = Signal((len(cw) + 1, True), reset_less=True)
-            z0 = Signal((len(cr), True), reset_less=True)
+            z1 = Signal((len(cw) + 1, True), reset_less=True)
             self.sync += [
-                z0.eq(cr),
-                z.eq(cw - z0),
+                cw.eq(z),
+                z1.eq(z - cr),
                 If(rst[i],
-                    z.eq(0),
+                    cw.eq(0),
+                    z1.eq(0),
                 ),
             ]
+            z = z1
         for i, (ir, iw) in enumerate(zip(integ_r, integ_w)):
             self.sync += [
                 iw.eq(ir + z),
