@@ -327,6 +327,9 @@ class Frame(Module):
 class Interpolator(Module):
     def __init__(self, n_channels=32, n_bits=16):
         self.rate = Signal(5, reset=16)
+        self.x = [Signal((n_bits, True)) for _ in range(n_channels)]
+        self.y = [Signal((n_bits, True)) for _ in range(n_channels)]        
+        
         self.submodules.cic0 = CIC(width=n_bits, order=3,
                 rate_width=1 << len(self.rate) - 1, channels=n_channels//2)
         self.submodules.cic1 = CIC(width=n_bits, order=3,
@@ -344,8 +347,7 @@ class Interpolator(Module):
             self.cic1.rate.eq(self.cic0.rate),
             self.cic1.gain_shift.eq(self.cic0.gain_shift),
         ]
-        self.x = [Signal((n_bits, True)) for _ in range(n_channels)]
-        self.y = [Signal((n_bits, True)) for _ in range(n_channels)]
+
         self.sync += [
             self.cic0.x.eq(Array(self.x[:16])[self.cic0.xi]),
             self.cic1.x.eq(Array(self.x[16:])[self.cic1.xi]),

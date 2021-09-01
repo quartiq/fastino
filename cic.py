@@ -12,8 +12,9 @@ from migen import *
 # [x] proper reset sequencing
 # [x] check ice40 ebr mapping/mask
 # [x] resource usage (clock domain (spi 2x16ch or word 3x11ch))
-# [ ] Fastino integration, with bypass
+# [ ] Fastino integration
 # [ ] per channel interpolation rates
+# [ ] bypass for rate change and fast bursting
 # ([ ] pipe draining: not possible/not required)
 # ([ ] non-power-of-two number of channels: not necessary)
 # ([ ] rate change/reset sequencing with output integrator
@@ -33,8 +34,9 @@ class CIC(Module):
         """
         # rate change, rate ratio is `r_output/r_input = rate + 1`
         self.rate = Signal(rate_width)
-        # output right shift to account for filter gain
-        # should be ceil(order*log2(rate + 1))
+        # output right shift to compensate filter gain
+        # filter gain is (rate + 1)**order
+        # gain_shift should be ceil(order*log2(rate + 1))
         self.gain_shift = Signal(max=order*rate_width + 1)
         # clear combs and integrators to establish new rate
         self.rate_stb = Signal()
@@ -69,15 +71,15 @@ class CIC(Module):
                 channel.eq(0),
                 rate_cnt.eq(rate_cnt - 1),
                 we[0].eq(0),
+                rst[0].eq(0),
                 If(rate_cnt == 0,
                     rate_cnt.eq(self.rate),
                     we[0].eq(1),
-                    rst[0].eq(0),
                 ),
             ),
             If(self.rate_stb,
                 channel.eq(0),
-                rate_cnt.eq(0),
+                rate_cnt.eq(self.rate),
                 we[0].eq(1),
                 rst[0].eq(1),
             )
