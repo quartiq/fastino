@@ -33,49 +33,57 @@ class CIC(Module):
         channels: number of channels, must be power of two (currently,
             for easy wrapping)
         """
+        ## Inputs
         # Current input sample for the given channel
         self.x = Signal((width, True), reset_less=True)
         # Input sample valid
         self.stb = Signal()
         # Clear combs and integrators to establish new rate for current channel.
-        # This settles and bypasses the filter for `order` input samples
+        # This re-settles and bypasses the filter for `order` input samples
         # using the previous input sample. In bypass while settling
-        # the gain is exactly 1.
-        # This module needs a reset on all channels after a clock domain reset.
+        # the output is marked invalid.
         self.reset = Signal()
-        # Rate ratio is `r_output/r_input = rate + 1`
+        # Rate ratio is `r_output/r_input = rate + 1` for current channel
         # Only change `rate` when applying `reset` as well.
         self.rate = Signal(rate_width)
-        # Output right shift to compensate filter gain
+        # Output right shift to compensate filter gain for current channel
         # The overall filter gain is `(rate + 1) << order`
         # gain_shift should be `ceil(order * log2(rate + 1))`
         # Thus to ensure overall gain of 1 choose rates that are powers
         # of two.
         self.shift = Signal(max=order*rate_width + 1)
 
-        # current channel
+        ## Outputs
+        # current input channel index
         self.xi = Signal(max=channels)
         # input sample acknowledged
         self.ack = Signal()
-
         # output sample for given output channel
         self.y = Signal((width, True), reset_less=True)
-        # output channel
+        # output channel index
         self.yi = Signal(max=channels)
+        # output is valid
+        self.valid = Signal()
 
         ###
 
+        assert channels > 2
+        assert log2_int(channels)
+
+        # global initialization sequencer
+        clear = Signal(reset=1)
         # channel counter
         channel = Signal(max=channels)
         self.sync += [
             channel.eq(channel + 1),
             If(channel == channels - 1,
                 channel.eq(0),
+                clear.eq(0),
             ),
         ]
         self.comb += [
             self.xi.eq(channel),
-            # pipeline latency, # TODO: modulo
+            # pipeline latency, TODO: modulo
             self.yi.eq(channel - 2*order - 1),
         ]
 
@@ -84,7 +92,7 @@ class CIC(Module):
             # output sample counter per input sample
             ("i_rate", rate_width),
             # bypass input sample counter
-            ("i_bypass", log2_int(order, need_pow2=False)),
+            ("i_bypass", log2_int(order + 1, need_pow2=False)),
             # input memory to ensure constancy over one output sample
             # and to support bypass
             ("x", (width, True)),
@@ -101,7 +109,7 @@ class CIC(Module):
                 (width + order + (rate_width - 1)*(n + 1), True)))
         read = Record(layout)
         write = Record(layout, reset_less=True)
-        we = Signal(len(layout), reset_less=True)
+        we = Signal(len(layout), reset_less=True, reset=(1 << len(layout)) - 1)
 
         mem = Memory(len(read), channels)
         mem_r = mem.get_port()
@@ -123,7 +131,7 @@ class CIC(Module):
         self.comb += [
             rate_done.eq(read.i_rate == 0),
             do_bypass.eq(read.i_bypass != 0),
-            self.ack.eq(rate_done & ~(do_bypass | self.reset)),
+            self.ack.eq(rate_done & ~(do_bypass | self.reset | clear)),
         ]
 
         self.sync += [
@@ -132,40 +140,47 @@ class CIC(Module):
             If(rate_done | self.reset,
                 write.i_rate.eq(self.rate),
             ),
-            we[0].eq(1),
+            If(clear,
+                write.i_rate.eq(0),
+            ),
+            # we[0] is 1
 
             # bypass counter updates
             write.i_bypass.eq(read.i_bypass - 1),
             If(self.reset,
                 write.i_bypass.eq(order),
             ),
-            we[1].eq(self.reset | (do_bypass & rate_done)),
+            If(clear,
+                write.i_bypass.eq(0),
+            ),
+            we[1].eq(self.reset | clear | (do_bypass & rate_done)),
 
             # x memory updates
             write.x.eq(self.x),
-            we[2].eq(self.stb & self.ack),
+            If(clear,
+                write.x.eq(0),
+            ),
+            we[2].eq((self.stb & self.ack) | clear),
 
             # write-enable ripples through combs
-            we[3:3 + order].eq(Cat(rate_done | self.reset, we[3:])),
-            # integrators always write
-            we[3 + order:].eq(Replicate(1, order)),
+            we[3:3 + order].eq(Cat(rate_done | self.reset | clear, we[3:])),
+            # integrators always write (we is 1)
         ]
 
         # shift registers to ripple along the comb and integrator stages
         shift_sr = [Signal(max=order*rate_width + 1, reset_less=True)
             for _ in range(2*order)]
-        bypass_sr = Signal(2*order, reset_less=True)
-        x_sr = [Signal((width, True), reset_less=True) for _ in range(2*order)]
+        valid_sr = Signal(2*order + 1)
         rst = Signal(2*order)
         rst_sr = Signal(2*order - 1, reset_less=True)
         self.sync += [
             Cat(shift_sr).eq(Cat(self.shift, shift_sr)),
-            bypass_sr.eq(Cat(do_bypass | self.reset, bypass_sr)),
-            Cat(x_sr).eq(Cat(read.x, x_sr)),
+            valid_sr.eq(Cat(~(do_bypass | self.reset), valid_sr)),
             rst_sr.eq(rst),
         ]
         self.comb += [
-            rst.eq(Cat(self.reset, rst_sr)),
+            rst.eq(Cat(self.reset | clear, rst_sr)),
+            self.valid.eq(valid_sr[-1]),
         ]
 
         # Data path
@@ -213,7 +228,4 @@ class CIC(Module):
         # output stage
         self.sync += [
             self.y.eq(z >> shift_sr[-1]),
-            If(bypass_sr[-1],
-               self.y.eq(x_sr[-1]),
-            )
         ]

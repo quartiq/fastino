@@ -3,8 +3,8 @@ from math import gcd
 from migen import *
 from migen.genlib.cdc import MultiReg, AsyncResetSynchronizer, BlindTransfer
 from misoc.cores.liteeth_mini.mac.crc import LiteEthMACCRCEngine
-from cic import CIC
 
+from interpolator import Interpolator
 
 class SlipSR(Module):
     """Shift register deserializer.
@@ -323,41 +323,6 @@ class Frame(Module):
             ),
         ]
 
-
-class Interpolator(Module):
-    def __init__(self, n_channels=32, n_bits=16):
-        self.x = [Signal((n_bits, True)) for _ in range(n_channels)]
-        self.y = [Signal((n_bits, True)) for _ in range(n_channels)]        
-        self.reset = Signal()
-        self.rate = Signal(16)
-        self.shift = Signal(6)
-
-        self.submodules.cic0 = CIC(width=n_bits, order=3,
-                rate_width=len(self.rate),
-                channels=n_channels//2)
-        self.submodules.cic1 = CIC(width=n_bits, order=3,
-                rate_width=len(self.rate),
-                channels=n_channels//2)
-        self.sync += [
-            self.cic0.rate.eq(self.rate),
-            self.cic0.shift.eq(self.shift),
-            self.cic0.reset.eq(self.reset),
-            self.cic0.stb.eq(1),
-
-            self.cic1.rate.eq(self.cic0.rate),
-            self.cic1.shift.eq(self.cic0.shift),
-            self.cic1.reset.eq(self.cic0.reset),
-            self.cic1.stb.eq(self.cic0.stb),
-        ]
-
-        self.sync += [
-            self.cic0.x.eq(Array(self.x[:16])[self.cic0.xi]),
-            self.cic1.x.eq(Array(self.x[16:])[self.cic1.xi]),
-            Array(self.y[:16])[self.cic0.yi].eq(self.cic0.y),
-            Array(self.y[16:])[self.cic1.yi].eq(self.cic1.y),
-        ]
-
-
 class MultiSPI(Module):
     """Multi-bus SPI streamer"""
     def __init__(self, platform, n_channels=32, n_bits=16):
@@ -533,8 +498,9 @@ class Fastino(Module):
         # calculate the minimum delay between the 28 ns word clock
         # and the 21 ns SPI clock: 7ns, if this is large enough we don't need a
         # synchronizer (see below)
-        print("min sys-spi clock delay", min((i*t_out) % (t_clk*self.link.n_div)
-            for i in range(1, (divf + 1)//gcd(divr + 1, divf + 1))))
+        print("Check 'Max delay posedge sys_clk -> posedge spi_clk' <",
+            min((i*t_out) % (t_clk*self.link.n_div)
+                for i in range(1, (divf + 1)//gcd(divr + 1, divf + 1))))
         t_idle = n_frame*t_clk*self.link.n_div - (n_bits + 1)*t_out
         assert t_idle >= 0, t_idle
         t_vco = t_out/2**divq
@@ -576,14 +542,12 @@ class Fastino(Module):
         # no cdc, assume timing is comensurate such that
         # max data delay sys-spi < min sys-spi clock delay over all alignments
         self.comb += [
-            self.spi.stb.eq(self.frame.stb),
+            self.int.stb.eq(self.frame.stb),
+            self.int.data.eq(self.frame.body),
+            self.int.typ.eq(cfg.reserved),
+            self.spi.stb.eq(self.int.valid),
             #self.spi.data.eq(self.frame.body[-len(self.spi.data):])
-            Cat(self.int.x).eq(self.frame.body[-len(Cat(self.int.x)):]),
-            Cat(self.spi.data).eq(Cat(
-                self.frame.body[-len(self.spi.data):][:32], self.int.y)),
-            self.int.rate.eq(((cfg.reserved[0] + 1) << cfg.reserved[1:5]) - 1),
-            self.int.reset.eq(cfg.reserved[5]),
-            self.int.shift.eq(cfg.reserved[6:] << 4),
+            self.spi.data.eq(Cat(self.int.en, self.int.y)),
         ]
 
         self.comb += [
