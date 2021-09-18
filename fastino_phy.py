@@ -326,26 +326,28 @@ class Frame(Module):
 
 class Interpolator(Module):
     def __init__(self, n_channels=32, n_bits=16):
-        self.rate = Signal(5, reset=16)
         self.x = [Signal((n_bits, True)) for _ in range(n_channels)]
         self.y = [Signal((n_bits, True)) for _ in range(n_channels)]        
-        
+        self.reset = Signal()
+        self.rate = Signal(16)
+        self.shift = Signal(6)
+
         self.submodules.cic0 = CIC(width=n_bits, order=3,
-                rate_width=1 << len(self.rate) - 1, channels=n_channels//2)
+                rate_width=len(self.rate),
+                channels=n_channels//2)
         self.submodules.cic1 = CIC(width=n_bits, order=3,
-                rate_width=1 << len(self.rate) - 1, channels=n_channels//2)
-        rate0 = Signal.like(self.rate)
+                rate_width=len(self.rate),
+                channels=n_channels//2)
         self.sync += [
-            self.cic0.rate.eq(Array([(1 << i) - 1 for i in range(17)])[self.rate]),
-            self.cic0.gain_shift.eq(3*(self.rate + 1)),
-            If(self.rate != rate0,
-                self.cic0.rate_stb.eq(1),
-            ),
-        ]
-        self.comb += [
-            self.cic1.rate_stb.eq(self.cic0.rate_stb),
+            self.cic0.rate.eq(self.rate),
+            self.cic0.shift.eq(self.shift),
+            self.cic0.reset.eq(self.reset),
+            self.cic0.stb.eq(1),
+
             self.cic1.rate.eq(self.cic0.rate),
-            self.cic1.gain_shift.eq(self.cic0.gain_shift),
+            self.cic1.shift.eq(self.cic0.shift),
+            self.cic1.reset.eq(self.cic0.reset),
+            self.cic1.stb.eq(self.cic0.stb),
         ]
 
         self.sync += [
@@ -579,7 +581,9 @@ class Fastino(Module):
             Cat(self.int.x).eq(self.frame.body[-len(Cat(self.int.x)):]),
             Cat(self.spi.data).eq(Cat(
                 self.frame.body[-len(self.spi.data):][:32], self.int.y)),
-            self.int.rate.eq(cfg.reserved),
+            self.int.rate.eq(((cfg.reserved[0] + 1) << cfg.reserved[1:5]) - 1),
+            self.int.reset.eq(cfg.reserved[5]),
+            self.int.shift.eq(cfg.reserved[6:] << 4),
         ]
 
         self.comb += [
