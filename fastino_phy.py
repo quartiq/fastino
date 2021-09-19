@@ -390,6 +390,28 @@ class MultiSPI(Module):
             self.comb += spi[i].ldacn.eq(0)
 
 
+class Aligner(Module):
+    def __init__(self, cd_fast="spi", cd_slow="sys"):
+        # the current fast period is fully contained within one slow period
+        self.aligned = Signal()
+
+        ###
+
+        slow = Signal(reset_less=True)
+        cd_slow = getattr(self.sync, cd_slow)
+        cd_slow += [
+            slow.eq(~slow),
+        ]
+        fast = Signal(reset_less=True)
+        cd_fast = getattr(self.sync, cd_fast)
+        cd_fast += [
+            fast.eq(slow),
+        ]
+        self.comb += [
+            self.aligned.eq(fast == slow),
+        ]
+
+
 class Fastino(Module):
     def __init__(self, platform):
         n_bits = 16
@@ -420,7 +442,8 @@ class Fastino(Module):
             ("dac_clr", 1),
             ("clr_err", 1),
             ("led", 8),
-            ("reserved", 8),
+            ("typ", 4),
+            ("reserved", 4),
         ])
         unlock = Signal(reset=1)
 
@@ -538,7 +561,7 @@ class Fastino(Module):
         self.submodules.int1 = ClockDomainsRenamer("spi")(Interpolator)(
             n_channels=16)
 
-        # no cdc, assume timing is comensurate such that
+        # no cdc, assume timing is synchronous and comensurate such that
         # max data delay sys-spi < min sys-spi clock delay over all alignments
         self.comb += [
             self.int0.stb.eq(self.frame.stb),
@@ -558,7 +581,6 @@ class Fastino(Module):
 
         self.comb += [
             self.spi.stb.eq(self.int0.valid),
-            #self.spi.data.eq(self.frame.body[-len(self.spi.data):])
             self.spi.data.eq(Cat(
                 self.int0.en,
                 self.int1.en,

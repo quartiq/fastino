@@ -21,8 +21,8 @@ class Interpolator(Module):
         self.submodules += cic
         assert cic.latency < n_channels
 
-        rate_reset = Signal(n_channels)
-        enable_sr = Signal(2*n_channels)
+        rate_reset = Signal(n_channels, reset_less=True)
+        enable_sr = Signal(2*n_channels, reset_less=True)
         sr = [Signal(n_bits, reset_less=True)
               for _ in range(2*n_channels - cic.latency)]
 
@@ -45,7 +45,7 @@ class Interpolator(Module):
             If(cic.xi == n_channels - 1,
                 cic.ce.eq(0),
             ),
-            If(self.stb & ~cic.ce,  # | (cic.xi == n_channels - 1),
+            If(self.stb,
                 Cat(sr[:n_channels]).eq(self.data[n_channels:]),
                 If(self.typ == 0,
                     enable_sr[cic.latency:cic.latency + n_channels].eq(
