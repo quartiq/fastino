@@ -533,21 +533,38 @@ class Fastino(Module):
             AsyncResetSynchronizer(cd_spi, ~locked),
         ]
 
-        self.submodules.int = ClockDomainsRenamer("spi")(Interpolator)()
-
-        self.submodules.spi = MultiSPI(platform)
-
-        assert len(cfg) + len(adr) + len(self.spi.data) == len(self.frame.body)
+        self.submodules.int0 = ClockDomainsRenamer("spi")(Interpolator)(
+            n_channels=16)
+        self.submodules.int1 = ClockDomainsRenamer("spi")(Interpolator)(
+            n_channels=16)
 
         # no cdc, assume timing is comensurate such that
         # max data delay sys-spi < min sys-spi clock delay over all alignments
         self.comb += [
-            self.int.stb.eq(self.frame.stb),
-            self.int.data.eq(self.frame.body),
-            self.int.typ.eq(cfg.reserved),
-            self.spi.stb.eq(self.int.valid),
+            self.int0.stb.eq(self.frame.stb),
+            self.int1.stb.eq(self.int0.stb),
+            Cat(
+                self.int0.data[:16],
+                self.int1.data[:16],
+                self.int0.data[16:],
+                self.int1.data[16:],
+            ).eq(self.frame.body[len(cfg) + len(adr):]),
+            self.int0.typ.eq(self.frame.body[len(cfg) - 8]),
+            self.int1.typ.eq(self.int0.typ),
+        ]
+
+        self.submodules.spi = MultiSPI(platform)
+        assert len(cfg) + len(adr) + len(self.spi.data) == len(self.frame.body)
+
+        self.comb += [
+            self.spi.stb.eq(self.int0.valid),
             #self.spi.data.eq(self.frame.body[-len(self.spi.data):])
-            self.spi.data.eq(Cat(self.int.en, self.int.y)),
+            self.spi.data.eq(Cat(
+                self.int0.en,
+                self.int1.en,
+                self.int0.y,
+                self.int1.y,
+            )),
         ]
 
         self.comb += [

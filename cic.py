@@ -39,9 +39,8 @@ class CIC(Module):
         # Input sample valid
         self.stb = Signal()
         # Clear combs and integrators to establish new rate for current channel.
-        # This re-settles and bypasses the filter for `order` input samples
-        # using the previous input sample. In bypass while settling
-        # the output is marked invalid.
+        # This re-settles the filter for the duration of `order` input samples.
+        # While settling the output is marked invalid.
         self.reset = Signal()
         # Rate ratio is `r_output/r_input = rate + 1` for current channel
         # Only change `rate` when applying `reset` as well.
@@ -65,6 +64,7 @@ class CIC(Module):
         # output is valid
         self.valid = Signal()
 
+        self.latency = 2*order
         ###
 
         assert channels > 2
@@ -84,18 +84,22 @@ class CIC(Module):
         self.comb += [
             self.xi.eq(channel),
             # pipeline latency, TODO: modulo
-            self.yi.eq(channel - 2*order - 1),
+            self.yi.eq(channel - self.latency),
         ]
 
         # Memory and ports to work on. This is a pipelined CIC.
         layout = [
             # output sample counter per input sample
             ("i_rate", rate_width),
-            # bypass input sample counter
-            ("i_bypass", log2_int(order + 1, need_pow2=False)),
+            # settle input sample counter
+            ("i_settle", log2_int(order + 1, need_pow2=False)),
             # input memory to ensure constancy over one output sample
-            # and to support bypass
+            # and to support settling
             ("x", (width, True)),
+            # shift amount
+            ("shift", len(self.shift)),
+            # rate
+            ("rate", rate_width),
         ]
         # See Hogenauer 1981 for bitgrowth
         # Comb stages
@@ -126,61 +130,64 @@ class CIC(Module):
         ]
 
         # state flags
-        do_bypass = Signal()
+        settled = Signal()
         rate_done = Signal()
+        cfg_update = Signal()
         self.comb += [
             rate_done.eq(read.i_rate == 0),
-            do_bypass.eq(read.i_bypass != 0),
-            self.ack.eq(rate_done & ~(do_bypass | self.reset | clear)),
+            settled.eq(read.i_settle == 0),
+            cfg_update.eq(self.reset | clear),
+            self.ack.eq(rate_done & settled),
         ]
 
         self.sync += [
             # rate counter updates
             write.i_rate.eq(read.i_rate - 1),
-            If(rate_done | self.reset,
-                write.i_rate.eq(self.rate),
+            If(rate_done,
+                write.i_rate.eq(read.rate),
             ),
-            If(clear,
-                write.i_rate.eq(0),
+            If(cfg_update,
+                write.i_rate.eq(self.rate),
             ),
             # we[0] is 1
 
-            # bypass counter updates
-            write.i_bypass.eq(read.i_bypass - 1),
-            If(self.reset,
-                write.i_bypass.eq(order),
+            # settle counter updates
+            write.i_settle.eq(read.i_settle - 1),
+            If(cfg_update,
+                write.i_settle.eq(order),
             ),
-            If(clear,
-                write.i_bypass.eq(0),
-            ),
-            we[1].eq(self.reset | clear | (do_bypass & rate_done)),
+            we[1].eq(cfg_update | (~settled & rate_done)),
 
             # x memory updates
             write.x.eq(self.x),
-            If(clear,
-                write.x.eq(0),
-            ),
-            we[2].eq((self.stb & self.ack) | clear),
+            we[2].eq(self.stb & self.ack),
+
+            write.shift.eq(self.shift),
+            we[3].eq(cfg_update),
+
+            write.rate.eq(self.rate),
+            we[4].eq(cfg_update),
 
             # write-enable ripples through combs
-            we[3:3 + order].eq(Cat(rate_done | self.reset | clear, we[3:])),
+            we[5:5 + order].eq(Cat(rate_done | cfg_update, we[5:])),
             # integrators always write (we is 1)
         ]
 
         # shift registers to ripple along the comb and integrator stages
         shift_sr = [Signal(max=order*rate_width + 1, reset_less=True)
-            for _ in range(2*order)]
-        valid_sr = Signal(2*order + 1)
-        rst = Signal(2*order)
-        rst_sr = Signal(2*order - 1, reset_less=True)
+            for _ in range(self.latency)]
+        valid_sr = Signal(self.latency)
+        rst = Signal(self.latency)
+        rst_sr = Signal(self.latency - 1, reset_less=True)
         self.sync += [
-            Cat(shift_sr).eq(Cat(self.shift, shift_sr)),
-            valid_sr.eq(Cat(~(do_bypass | self.reset), valid_sr)),
+            # no need to mux cfg_update as that sample will be marked
+            # invalid anyway
+            Cat(shift_sr).eq(Cat(read.shift, shift_sr)),
+            valid_sr.eq(Cat(settled & ~cfg_update, valid_sr)),
             rst_sr.eq(rst),
         ]
         self.comb += [
-            rst.eq(Cat(self.reset | clear, rst_sr)),
-            self.valid.eq(valid_sr[-1]),
+            rst.eq(Cat(cfg_update, rst_sr)),
         ]
 
         # Data path
@@ -226,6 +233,7 @@ class CIC(Module):
             ]
             z = iw
         # output stage
-        self.sync += [
+        self.comb += [
             self.y.eq(z >> shift_sr[-1]),
+            self.valid.eq(valid_sr[-1]),
         ]
