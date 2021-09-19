@@ -137,7 +137,7 @@ class CIC(Module):
             rate_done.eq(read.i_rate == 0),
             settled.eq(read.i_settle == 0),
             cfg_update.eq(self.reset | clear),
-            self.ack.eq(rate_done & settled & ~cfg_update),
+            self.ack.eq(rate_done & settled),
         ]
 
         self.sync += [
