@@ -12,7 +12,7 @@ class Interpolator(Module):
         self.y = [Signal(n_bits) for _ in range(n_channels)]
         self.en = Signal(n_channels)
         self.valid = Signal()
-        msb_flip = 1
+        msb_flip = 1  # conversion between offset-binary and twos-complement
 
         ###
 
@@ -27,7 +27,7 @@ class Interpolator(Module):
               for _ in range(2*n_channels - cic.latency)]
 
         self.comb += [
-            cic.x.eq(sr[0] + (msb_flip << n_bits - 1)),
+            cic.x.eq(sr[0] ^ (msb_flip << n_bits - 1)),
             cic.stb.eq(enable[0]),
             cic.reset.eq(reset[0]),
             cic.rate.eq(((sr[0][:n_mantissa] + 1) <<
@@ -40,7 +40,7 @@ class Interpolator(Module):
                 reset.eq(reset[1:]),
                 enable.eq(Cat(enable[1:], enable[0])),
                 self.en.eq(Cat(self.en[1:], cic.valid)),
-                Cat(sr).eq(Cat(sr[1:], cic.y + (msb_flip << n_bits - 1))),
+                Cat(sr).eq(Cat(sr[1:], cic.y ^ (msb_flip << n_bits - 1))),
             ),
             If(cic.xi == n_channels - 1,
                 cic.ce.eq(0),
