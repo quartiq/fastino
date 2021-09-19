@@ -21,25 +21,25 @@ class Interpolator(Module):
         self.submodules += cic
         assert cic.latency < n_channels
 
-        rate_reset = Signal(n_channels, reset_less=True)
-        enable_sr = Signal(2*n_channels, reset_less=True)
+        reset = Signal(n_channels, reset_less=True)
+        enable = Signal(n_channels, reset_less=True)
         sr = [Signal(n_bits, reset_less=True)
               for _ in range(2*n_channels - cic.latency)]
 
         self.comb += [
             cic.x.eq(sr[0] + (msb_flip << n_bits - 1)),
-            cic.stb.eq(enable_sr[cic.latency]),
-            cic.reset.eq(rate_reset[0]),
+            cic.stb.eq(enable[0]),
+            cic.reset.eq(reset[0]),
             cic.rate.eq(((sr[0][:n_mantissa] + 1) <<
                           sr[0][n_mantissa:n_mantissa + n_exp]) - 1),
             cic.shift.eq(sr[0][n_mantissa + n_exp:]),
             Cat(self.y).eq(Cat(sr[-n_channels:])),
-            self.en.eq(enable_sr[-n_channels:]),
         ]
         self.sync += [
             If(cic.ce,
-                rate_reset.eq(rate_reset[1:]),
-                enable_sr.eq(Cat(enable_sr[1:], enable_sr[0] & cic.valid)),
+                reset.eq(reset[1:]),
+                enable.eq(Cat(enable[1:], enable[0])),
+                self.en.eq(Cat(self.en[1:], cic.valid)),
                 Cat(sr).eq(Cat(sr[1:], cic.y + (msb_flip << n_bits - 1))),
             ),
             If(cic.xi == n_channels - 1,
@@ -48,11 +48,9 @@ class Interpolator(Module):
             If(self.stb,
                 Cat(sr[:n_channels]).eq(self.data[n_channels:]),
                 If(self.typ == 0,
-                    enable_sr[cic.latency:cic.latency + n_channels].eq(
-                        self.data),
+                    enable.eq(self.data),
                 ).Elif(self.typ == 1,
-                    enable_sr[cic.latency:cic.latency + n_channels].eq(0),
-                    rate_reset.eq(self.data),
+                    reset.eq(self.data),
                 ),
                 cic.ce.eq(1),
             ),

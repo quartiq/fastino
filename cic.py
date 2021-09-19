@@ -96,6 +96,8 @@ class CIC(Module):
             # input memory to ensure constancy over one output sample
             # and to support settling
             ("x", (width, True)),
+            # input sample flag
+            ("valid", 1),
             # shift amount
             ("shift", len(self.shift)),
             # rate
@@ -137,7 +139,7 @@ class CIC(Module):
             rate_done.eq(read.i_rate == 0),
             settled.eq(read.i_settle == 0),
             cfg_update.eq(self.reset | clear),
-            self.ack.eq(rate_done & settled),
+            self.ack.eq(rate_done & settled & ~cfg_update),
         ]
 
         self.sync += [
@@ -162,14 +164,17 @@ class CIC(Module):
             write.x.eq(self.x),
             we[2].eq(self.stb & self.ack),
 
-            write.shift.eq(self.shift),
-            we[3].eq(cfg_update),
+            write.valid.eq(self.stb),
+            we[3].eq(self.ack),
 
-            write.rate.eq(self.rate),
+            write.shift.eq(self.shift),
             we[4].eq(cfg_update),
 
+            write.rate.eq(self.rate),
+            we[5].eq(cfg_update),
+
             # write-enable ripples through combs
-            we[5:5 + order].eq(Cat(rate_done | cfg_update, we[5:])),
+            we[6:6 + order].eq(Cat(rate_done | cfg_update, we[6:])),
             # integrators always write (we is 1)
         ]
 
@@ -183,7 +188,7 @@ class CIC(Module):
             # no need to mux cfg_update as that sample will be marked
             # invalid anyway
             Cat(shift_sr).eq(Cat(read.shift, shift_sr)),
-            valid_sr.eq(Cat(settled & ~cfg_update, valid_sr)),
+            valid_sr.eq(Cat(settled & ~cfg_update & read.valid, valid_sr)),
             rst_sr.eq(rst),
         ]
         self.comb += [
