@@ -8,20 +8,6 @@ from migen import *
 # * one output sample per clock cycle
 #    (minimum output sample period per channel: number of channels)
 
-# TODO
-# [x] proper reset sequencing
-# [x] check ice40 ebr mapping/mask
-# [x] resource usage (clock domain (spi 2x16ch or word 3x11ch))
-# [ ] Fastino integration
-# [x] per channel interpolation rates
-# [x] bypass for rate change and fast bursting
-# ([ ] pipe draining: not possible/not required)
-# ([ ] non-power-of-two number of channels: not necessary)
-# ([ ] rate change/reset sequencing with output integrator
-#     forced update: not necessary)
-# ([ ] possibly n-by-m channels (iter-by-parallel) and a single BRAM:
-#     not necessary)
-
 
 class CIC(Module):
     def __init__(self, width=16, rate_width=16, order=3, channels=4):
