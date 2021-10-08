@@ -7,7 +7,8 @@ class Interpolator(Module):
                  order=3):
         self.typ = Signal()
         self.stb = Signal()
-        self.data = Signal(n_channels + n_channels*n_bits, reset_less=True)
+        self.data = Signal(n_channels*n_bits, reset_less=True)
+        self.en_in = Signal(n_channels)
 
         self.y = [Signal(n_bits) for _ in range(n_channels)]
         self.en = Signal(n_channels)
@@ -23,14 +24,11 @@ class Interpolator(Module):
 
         reset = Signal(n_channels, reset_less=True)
         enable = Signal(3*n_channels, reset_less=True)
-        typ = Signal(reset_less=True)
         sr = [Signal(n_bits, reset_less=True)
               for _ in range(2*n_channels - cic.latency)]
-        stb0 = Signal(reset_less=True)
 
         self.comb += [
-            cic.x.eq(sr[0] ^ (msb_flip << n_bits - 1)),
-            cic.stb.eq(typ == 0),
+            cic.x.eq(sr[0] + (msb_flip << n_bits - 1)),
             cic.reset.eq(reset[0]),
             cic.rate.eq(((sr[0][:n_mantissa] + 1) <<
                           sr[0][n_mantissa:n_mantissa + n_exp]) - 1),
@@ -42,20 +40,20 @@ class Interpolator(Module):
             If(cic.ce,
                 reset.eq(reset[1:]),
                 enable.eq(Cat(enable[1:], cic.valid & enable[0])),
-                Cat(sr).eq(Cat(sr[1:], cic.y ^ (msb_flip << n_bits - 1))),
+                Cat(sr).eq(Cat(sr[1:], cic.y + (msb_flip << n_bits - 1))),
             ),
             If(cic.xi == n_channels - 1,
                 cic.ce.eq(0),
             ),
-            stb0.eq(~self.stb),
-            If(self.stb & stb0,
-                Cat(sr[:n_channels]).eq(self.data[n_channels:]),
-                typ.eq(self.typ),
+            If(self.stb & ~cic.ce,
+                Cat(sr[:n_channels]).eq(self.data),
+                cic.stb.eq(self.typ == 0),
                 If(self.typ == 0,
                     enable[n_channels + cic.latency:2*n_channels + cic.latency].eq(
-                        self.data),
+                        self.en_in),
                 ).Elif(self.typ == 1,
-                    reset.eq(self.data),
+                    enable[n_channels + cic.latency:2*n_channels + cic.latency].eq(0),
+                    reset.eq(self.en_in),
                 ),
                 cic.ce.eq(1),
             ),

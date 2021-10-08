@@ -39,8 +39,8 @@ class Fastino(Module):
             ("dac_clr", 1),
             ("clr_err", 1),
             ("led", 8),
-            ("typ", 4),
-            ("reserved", 4),
+            ("typ", 1),
+            ("reserved", 7),
         ])
         unlock = Signal(reset=1)
 
@@ -157,33 +157,39 @@ class Fastino(Module):
             n_channels=16)
         self.submodules.int1 = ClockDomainsRenamer("spi")(Interpolator)(
             n_channels=16)
+        stb0 = Signal(reset_less=True)
 
         # no cdc, assume timing is synchronous and comensurate such that
         # max data delay sys-spi < min sys-spi clock delay over all alignments
-        self.comb += [
-            self.int0.stb.eq(self.frame.stb),
-            self.int1.stb.eq(self.int0.stb),
-            Cat(
-                self.int0.data[:16],
-                self.int1.data[:16],
-                self.int0.data[16:],
-                self.int1.data[16:],
-            ).eq(self.frame.body[len(cfg) + len(adr):]),
+        body = Cat(
+                self.int0.en_in,
+                self.int1.en_in,
+                self.int0.data,
+                self.int1.data,
+        )
+        self.sync.spi += [
+            stb0.eq(~self.frame.stb),
+            self.int0.stb.eq(self.frame.stb & stb0),
+            self.int1.stb.eq(self.frame.stb & stb0),
+            body.eq(self.frame.body[-len(body):]),
             self.int0.typ.eq(self.frame.body[len(cfg) - 8]),
-            self.int1.typ.eq(self.int0.typ),
+            self.int1.typ.eq(self.frame.body[len(cfg) - 8]),
         ]
 
         self.submodules.spi = MultiSPI(platform)
+        assert len(body) == len(self.spi.data)
         assert len(cfg) + len(adr) + len(self.spi.data) == len(self.frame.body)
 
-        self.comb += [
-            self.spi.stb.eq(self.int0.valid),
-            self.spi.data.eq(Cat(
+        body = Cat(
                 self.int0.en,
                 self.int1.en,
                 self.int0.y,
                 self.int1.y,
-            )),
+        )
+        assert len(body) == len(self.spi.data)
+        self.comb += [
+            self.spi.stb.eq(self.int0.valid),
+            self.spi.data.eq(body),
         ]
 
         self.comb += [
