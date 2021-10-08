@@ -26,6 +26,7 @@ class Interpolator(Module):
         typ = Signal(reset_less=True)
         sr = [Signal(n_bits, reset_less=True)
               for _ in range(2*n_channels - cic.latency)]
+        stb0 = Signal(reset_less=True)
 
         self.comb += [
             cic.x.eq(sr[0] ^ (msb_flip << n_bits - 1)),
@@ -46,7 +47,8 @@ class Interpolator(Module):
             If(cic.xi == n_channels - 1,
                 cic.ce.eq(0),
             ),
-            If(self.stb,
+            stb0.eq(~self.stb),
+            If(self.stb & stb0,
                 Cat(sr[:n_channels]).eq(self.data[n_channels:]),
                 typ.eq(self.typ),
                 If(self.typ == 0,
