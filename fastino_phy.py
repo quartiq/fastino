@@ -164,13 +164,13 @@ class Fastino(Module):
         body = Cat(
                 self.int0.en_in,
                 self.int1.en_in,
-                self.int0.data,
-                self.int1.data,
+                self.int0.x,
+                self.int1.x,
         )
         self.sync.spi += [
             stb0.eq(~self.frame.stb),
-            self.int0.stb.eq(self.frame.stb & stb0),
-            self.int1.stb.eq(self.frame.stb & stb0),
+            self.int0.stb_in.eq(self.frame.stb & stb0),
+            self.int1.stb_in.eq(self.frame.stb & stb0),
             body.eq(self.frame.body[-len(body):]),
             self.int0.typ.eq(self.frame.body[len(cfg) - 8]),
             self.int1.typ.eq(self.frame.body[len(cfg) - 8]),
@@ -181,14 +181,14 @@ class Fastino(Module):
         assert len(cfg) + len(adr) + len(self.spi.data) == len(self.frame.body)
 
         body = Cat(
-                self.int0.en,
-                self.int1.en,
+                self.int0.en_out,
+                self.int1.en_out,
                 self.int0.y,
                 self.int1.y,
         )
         assert len(body) == len(self.spi.data)
         self.comb += [
-            self.spi.stb.eq(self.int0.valid),
+            self.spi.stb.eq(self.int0.stb_out),
             self.spi.data.eq(body),
         ]
 

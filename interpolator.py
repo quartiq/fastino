@@ -6,13 +6,13 @@ class Interpolator(Module):
     def __init__(self, n_channels=16, n_bits=16, n_mantissa=6, n_exp=4,
                  order=3):
         self.typ = Signal()
-        self.stb = Signal()
-        self.data = Signal(n_channels*n_bits, reset_less=True)
+        self.stb_in = Signal()
+        self.x = [Signal(n_bits, reset_less=True) for _ in range(n_channels)]
         self.en_in = Signal(n_channels)
 
         self.y = [Signal(n_bits) for _ in range(n_channels)]
-        self.en = Signal(n_channels)
-        self.valid = Signal()
+        self.en_out = Signal(n_channels)
+        self.stb_out = Signal()
         msb_flip = 1  # conversion between offset-binary and twos-complement
 
         ###
@@ -34,7 +34,7 @@ class Interpolator(Module):
                           sr[0][n_mantissa:n_mantissa + n_exp]) - 1),
             cic.shift.eq(sr[0][n_mantissa + n_exp:]),
             Cat(self.y).eq(Cat(sr[-n_channels:])),
-            self.en.eq(enable[-n_channels:]),
+            self.en_out.eq(enable[-n_channels:]),
         ]
         self.sync += [
             If(cic.ce,
@@ -45,8 +45,8 @@ class Interpolator(Module):
             If(cic.xi == n_channels - 1,
                 cic.ce.eq(0),
             ),
-            If(self.stb & ~cic.ce,
-                Cat(sr[:n_channels]).eq(self.data),
+            If(self.stb_in & ~cic.ce,
+                Cat(sr[:n_channels]).eq(Cat(self.x)),
                 cic.stb.eq(self.typ == 0),
                 If(self.typ == 0,
                     enable[n_channels + cic.latency:2*n_channels + cic.latency].eq(
@@ -57,5 +57,5 @@ class Interpolator(Module):
                 ),
                 cic.ce.eq(1),
             ),
-            self.valid.eq(cic.yi == n_channels - 1),
+            self.stb_out.eq(cic.yi == n_channels - 1),
         ]
