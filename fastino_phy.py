@@ -42,6 +42,7 @@ class Fastino(Module):
             ("typ", 1),
             ("reserved", 7),
         ])
+        cfg_comb = Record(cfg.layout)
         unlock = Signal(reset=1)
 
         # slow MISO lane, TBD
@@ -78,6 +79,7 @@ class Fastino(Module):
         assert len(status_) <= len(status)
 
         self.comb += [
+            cfg_comb.raw_bits().eq(self.frame.body),
             status.eq(status_),
             sdo.eq(sr[-1]),  # MSB first
             adr.eq(self.frame.body[len(cfg):]),
@@ -157,7 +159,6 @@ class Fastino(Module):
             n_channels=16)
         self.submodules.int1 = ClockDomainsRenamer("spi")(Interpolator)(
             n_channels=16)
-        stb0 = Signal(reset_less=True)
 
         # no cdc, assume timing is synchronous and comensurate such that
         # max data delay sys-spi < min sys-spi clock delay over all alignments
@@ -168,12 +169,11 @@ class Fastino(Module):
                 self.int1.x,
         )
         self.sync.spi += [
-            stb0.eq(~self.frame.stb),
-            self.int0.stb_in.eq(self.frame.stb & stb0),
-            self.int1.stb_in.eq(self.frame.stb & stb0),
+            self.int0.stb_in.eq(self.frame.stb),
+            self.int1.stb_in.eq(self.frame.stb),
             body.eq(self.frame.body[-len(body):]),
-            self.int0.typ.eq(self.frame.body[len(cfg) - 8]),
-            self.int1.typ.eq(self.frame.body[len(cfg) - 8]),
+            self.int0.typ.eq(cfg_comb.typ),
+            self.int1.typ.eq(cfg_comb.typ),
         ]
 
         self.submodules.spi = MultiSPI(platform)
@@ -190,6 +190,8 @@ class Fastino(Module):
         self.comb += [
             self.spi.stb.eq(self.int0.stb_out),
             self.spi.data.eq(body),
+        #    self.spi.data.eq(self.frame.body[-len(self.spi.data):]),
+        #    self.spi.stb.eq(self.frame.stb),
         ]
 
         self.comb += [
@@ -197,8 +199,8 @@ class Fastino(Module):
             platform.request("en_afe_pwr").eq(~cfg.afe_pwr_n),
             #platform.request("test_point", 2).eq(self.link.delay[0]),
             #platform.request("test_point", 3).eq(self.link.delay[1]),
-            platform.request("test_point", 3).eq(self.spi.busy),
-            platform.request("test_point", 4).eq(self.frame.stb),
+            #platform.request("test_point", 3).eq(self.spi.busy),
+            #platform.request("test_point", 4).eq(self.frame.stb),
             Cat(platform.request("user_led", i) for i in range(9)).eq(Cat(
                 cfg.led,
                 ResetSignal("spi") | have_align_err | have_crc_err,  # RED

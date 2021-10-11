@@ -28,7 +28,7 @@ class Interpolator(Module):
               for _ in range(2*n_channels - cic.latency)]
 
         self.comb += [
-            cic.x.eq(sr[0] + (msb_flip << n_bits - 1)),
+            cic.x.eq(sr[0] ^ (msb_flip << n_bits - 1)),
             cic.reset.eq(reset[0]),
             cic.rate.eq(((sr[0][:n_mantissa] + 1) <<
                           sr[0][n_mantissa:n_mantissa + n_exp]) - 1),
@@ -40,14 +40,15 @@ class Interpolator(Module):
             If(cic.ce,
                 reset.eq(reset[1:]),
                 enable.eq(Cat(enable[1:], cic.valid & enable[0])),
-                Cat(sr).eq(Cat(sr[1:], cic.y + (msb_flip << n_bits - 1))),
+                Cat(sr[:-1]).eq(Cat(sr[1:])),
+                sr[-1].eq(cic.y ^ (msb_flip << n_bits - 1)),
             ),
             If(cic.xi == n_channels - 1,
                 cic.ce.eq(0),
             ),
             If(self.stb_in & ~cic.ce,
                 Cat(sr[:n_channels]).eq(Cat(self.x)),
-                cic.stb.eq(self.typ == 0),
+                cic.stb.eq(~self.typ),
                 If(self.typ == 0,
                     enable[n_channels + cic.latency:2*n_channels + cic.latency].eq(
                         self.en_in),
