@@ -88,7 +88,7 @@ class Fastino(Module):
         self.sync += [
             sr[1:].eq(sr),
             If(self.frame.stb,
-                cfg.raw_bits().eq(self.frame.body),
+                cfg.raw_bits().eq(cfg_comb.raw_bits()),
                 # grab data from status register according to address
                 sr.eq(Array([status[i*n_frame:(i + 1)*n_frame]
                     for i in range(1 << len(adr))])[adr]),
@@ -188,7 +188,7 @@ class Fastino(Module):
         )
         assert len(body) == len(self.spi.data)
         self.comb += [
-            self.spi.stb.eq(self.int0.stb_out),
+            self.spi.stb.eq(self.int0.stb_out & self.int0.cic.ce),
             self.spi.data.eq(body),
         #    self.spi.data.eq(self.frame.body[-len(self.spi.data):]),
         #    self.spi.stb.eq(self.frame.stb),

@@ -19,7 +19,7 @@ class Interpolator(Module):
 
         cic = CEInserter()(CIC)(width=n_bits, order=order,
                   rate_width=n_bits, channels=n_channels)
-        self.submodules += cic
+        self.submodules.cic = cic
         assert cic.latency < n_channels
 
         reset = Signal(n_channels, reset_less=True)
