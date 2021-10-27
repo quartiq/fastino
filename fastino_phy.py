@@ -232,5 +232,10 @@ if __name__ == "__main__":
     from fastino import Platform
     platform = Platform()
     fastino = Fastino(platform)
-    platform.toolchain.nextpnr_build_template[1] = "nextpnr-ice40 {pnr_pkg_opts} --pcf {build_name}.pcf --json {build_name}.json --asc {build_name}.txt --pre-pack {build_name}_pre_pack.py --seed 9931"
-    platform.build(fastino, build_name="fastino")
+    for seed in range(10):
+        platform.toolchain.nextpnr_build_template[1] = "nextpnr-ice40 {pnr_pkg_opts} --pcf {build_name}.pcf --json {build_name}.json --asc {build_name}.txt --pre-pack {build_name}_pre_pack.py --seed %i" % seed
+        try:
+            platform.build(fastino, build_name="fastino")
+            break
+        except:
+            continue
