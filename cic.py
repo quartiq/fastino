@@ -37,6 +37,8 @@ class CIC(Module):
         # Thus to ensure overall gain of 1 choose rates that are powers
         # of two.
         self.shift = Signal(max=order*rate_width + 1)
+        # clock enable, drive together with a sync clock domain CE
+        self.cce = Signal(reset=1)
 
         ## Outputs
         # current input channel index
@@ -102,7 +104,7 @@ class CIC(Module):
         we = Signal(len(layout), reset_less=True, reset=(1 << len(layout)) - 1)
 
         mem = Memory(len(read), channels)
-        mem_r = mem.get_port()
+        mem_r = mem.get_port(has_re=True)
         mem_w = mem.get_port(write_capable=True, we_granularity=1)
         self.specials += mem, mem_r, mem_w
         self.comb += [
@@ -110,6 +112,7 @@ class CIC(Module):
             mem_w.dat_w.eq(write.raw_bits()),
             mem_r.adr.eq(mem_w.adr + 2),  # TODO: modulo if not power of two
             mem_w.adr.eq(channel),
+            mem_r.re.eq(self.cce),
             mem_w.we.eq(Cat(
                 Replicate(we[i], len(sig))
                 for i, (sig, _) in enumerate(write.iter_flat()))),

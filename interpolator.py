@@ -35,6 +35,7 @@ class Interpolator(Module):
             cic.shift.eq(sr[0][n_mantissa + n_exp:]),
             Cat(self.y).eq(Cat(sr[-n_channels:])),
             self.en_out.eq(enable[-n_channels:]),
+            cic.cce.eq(cic.ce),
         ]
         self.sync += [
             If(cic.ce,

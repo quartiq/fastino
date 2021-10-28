@@ -168,7 +168,7 @@ class Fastino(Module):
                 self.int0.x,
                 self.int1.x,
         )
-        self.sync.spi += [
+        self.sync.spi += [  # this should be comb but the stb path is long
             self.int0.stb_in.eq(self.frame.stb),
             self.int1.stb_in.eq(self.frame.stb),
             body.eq(self.frame.body[-len(body):]),
