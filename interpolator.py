@@ -4,7 +4,7 @@ from cic import CIC
 
 class Interpolator(Module):
     def __init__(self, n_channels=16, n_bits=16, n_mantissa=6, n_exp=4,
-                 order=2):
+                 order=3):
         self.typ = Signal()
         self.stb_in = Signal()
         self.x = [Signal(n_bits, reset_less=True) for _ in range(n_channels)]
