@@ -230,13 +230,13 @@ class Fastino(Module):
 
 if __name__ == "__main__":
     from fastino import Platform
-    for seed in range(1, 10):
-        print("Seed: {}".format(seed))
-        platform = Platform()
-        platform.toolchain.nextpnr_build_template[1] = "nextpnr-ice40 {pnr_pkg_opts} --pcf {build_name}.pcf --json {build_name}.json --asc {build_name}.txt --pre-pack {build_name}_pre_pack.py --seed %i" % seed
-        fastino = Fastino(platform)
-        try:
-            platform.build(fastino, build_name="fastino")
-            break
-        except:
-            continue
+    platform = Platform()
+    platform.toolchain.nextpnr_build_template[1:2] = [
+        "for seed in `seq 1 10`; do",
+        "echo Seed $seed",
+        ("nextpnr-ice40 {pnr_pkg_opts} --pcf {build_name}.pcf --json {build_name}.json "
+        "--asc {build_name}.txt --pre-pack {build_name}_pre_pack.py --seed $seed && break"),
+        "done"
+    ]
+    fastino = Fastino(platform)
+    platform.build(fastino, build_name="fastino")
